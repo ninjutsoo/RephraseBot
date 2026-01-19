@@ -393,8 +393,15 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False) -> str
     # Logic: If strict shortening needed (retry) OR original is close to limit, force shorter options.
     if force_short:
         length = "CRITICAL: MAKE IT SHORTER. Remove filler words. Condense sentences. STRICTLY UNDER 280 CHARS."
-    elif len(masked_text) > 240:
-        # Original is already close to limit, so NEVER ask to make it longer
+    elif len(masked_text) > 250:
+        # Very close to limit: ONLY allow shortening
+        length = random.choice([
+            "make 20-30% shorter by removing filler",
+            "compress into fewer sentences",
+            "condense strictly to fit under 280 chars"
+        ])
+    elif len(masked_text) > 220:
+        # Moderately close: Allow shortening or keeping same length
         length = random.choice([
             "make 20-30% shorter by removing filler",
             "compress into fewer sentences",
@@ -402,7 +409,7 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False) -> str
             "keep similar length but vary sentence lengths"
         ])
     else:
-        # Original is short enough to allow expansion
+        # Safe zone (< 220 chars): Allow expansion
         length = random.choice([
             "make 20-30% shorter by removing filler",
             "make 10-20% longer by expanding key points naturally",
