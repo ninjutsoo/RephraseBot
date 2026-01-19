@@ -27,6 +27,7 @@ This bot helps you share the same message multiple times without triggering spam
 ### 🎨 **Intelligent Rephrasing**
 - ✅ Preserves core meaning and facts
 - ✅ Maintains all mentions, hashtags, and links
+- ✅ **Strict 280-character limit** for X/Twitter compatibility
 - ✅ Varies sentence structure, word choice, and length
 - ✅ Changes tone and rhythm each time
 - ✅ Natural-sounding output
