@@ -19,10 +19,10 @@ This bot helps you share the same message multiple times without triggering spam
 ## ✨ Key Features
 
 ### 🛡️ **Anti-Spam Technology**
-- **Advanced variation engine**: Each rephrase is structurally and stylistically different
-- **171+ style combinations**: Randomly selected tone, length, and sentence structure
-- **Dynamic randomness**: Variable AI temperature (0.65-0.95) ensures uniqueness
-- **Smart preservation**: Keeps @mentions, #hashtags, URLs, and numbers intact
+- **463,050+ unique variations** per message via 6-dimensional randomization
+- **Dynamic AI creativity** with 3-tier temperature control (conservative to aggressive)
+- **Smart preservation** of @mentions, #hashtags, URLs, and numbers
+- **Nearly undetectable** as repeated content by spam filters
 
 ### 🎨 **Intelligent Rephrasing**
 - ✅ Preserves core meaning and facts
@@ -43,30 +43,30 @@ This bot helps you share the same message multiple times without triggering spam
 
 ### Input (Original Message):
 ```
-🔥 Join the protest tomorrow at 5 PM! 
-We need everyone at Freedom Square. 
-#IranRevolution2026 @FreedomNow
+🔥 Join the event tomorrow at 5 PM! 
+We need everyone at City Square. 
+#YourHashtag @YourChannel
 ```
 
 ### Output Examples (Different Each Time):
 
 **Variation 1** (Concise):
 ```
-Tomorrow 5 PM - Freedom Square. Everyone needed. 🔥
-#IranRevolution2026 @FreedomNow
+Tomorrow 5 PM - City Square. Everyone needed. 🔥
+#YourHashtag @YourChannel
 ```
 
 **Variation 2** (Formal):
 ```
-We're organizing a demonstration scheduled for tomorrow 
-evening at 5 PM. Your presence at Freedom Square is 
-essential. 🔥 #IranRevolution2026 @FreedomNow
+We're organizing a gathering scheduled for tomorrow 
+evening at 5 PM. Your presence at City Square is 
+essential. 🔥 #YourHashtag @YourChannel
 ```
 
 **Variation 3** (Restructured):
 ```
-Freedom Square tomorrow - that's where we gather at 5 PM. 
-Your participation matters. 🔥 #IranRevolution2026 @FreedomNow
+City Square tomorrow - that's where we meet at 5 PM. 
+Your participation matters. 🔥 #YourHashtag @YourChannel
 ```
 
 ### What Gets Preserved:
@@ -125,7 +125,7 @@ uvicorn main:app --reload
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TELEGRAM_WEBHOOK_SECRET_TOKEN` | None | Secret token for webhook verification |
-| `ALLOWED_FORWARD_CHANNEL` | `tweeterstormIranrevolution2026` | Channel username or ID to restrict forwarding from |
+| `ALLOWED_FORWARD_CHANNEL` | (Set in code) | Channel username or ID to restrict forwarding from |
 | `RATE_LIMIT_SECONDS` | `30` | Cooldown time between user requests (0 to disable) |
 | `SYSTEM_INSTRUCTION` | See `main.py` | Custom AI rephrasing instructions |
 | `GEMINI_MODEL` | `models/gemini-2.5-flash` | Gemini model to use |
@@ -134,38 +134,32 @@ uvicorn main:app --reload
 
 ## 🎨 Anti-Spam Variation Strategy
 
-The bot uses **multi-layered randomization** to ensure each rephrase is unique:
+The bot uses **6-dimensional randomization** to ensure each rephrase is unique:
 
-### 1. **Style Selection** (171 variations)
-Random selection from categories like:
-- Tone: formal, casual, urgent, calm, professional
-- Structure: concise, detailed, restructured
-- Voice: active, passive, mixed
-- Perspective: neutral, empathetic, assertive
+### Multi-Dimensional Parameters
+Each message is rephrased with randomly selected:
 
-### 2. **AI Temperature** (Dynamic)
-- Range: `0.65 - 0.95` (randomized per request)
-- Higher = more creative variations
-- Lower = more conservative changes
+1. **Structure** - How sentences are organized (3 options)
+2. **Length** - Target output length variation (5 options)  
+3. **Tone** - Formality and emotion level (6 options)
+4. **Sentence Style** - Short vs long, punctuation patterns (5 options)
+5. **Word Choice** - Vocabulary complexity and variety (6 options)
+6. **Additional Style** - From 171 curated style variations
 
-### 3. **Top-P Sampling** (Nucleus Sampling)
-- Range: `0.85 - 0.95` (randomized)
-- Controls diversity of word choices
+**Total combinations:** 3 × 5 × 6 × 5 × 6 × 171 = **463,050 variations**
 
-### 4. **Structural Transformations**
-- Sentence reordering
-- Clause restructuring  
-- Length variation (±30%)
-- Punctuation pattern changes
+### AI Randomness Levels
+- **Conservative** (temp: 0.6-0.8) - Safe, readable changes
+- **Moderate** (temp: 0.8-1.1) - Balanced creativity
+- **Aggressive** (temp: 1.1-1.4) - Maximum variation
 
-### 5. **Protection Mechanism**
-Before rephrasing, the bot:
-1. Identifies and masks all @mentions, #hashtags, URLs, numbers
-2. Replaces them with `__PROTECTED_0__`, `__PROTECTED_1__`, etc.
-3. Sends masked text to AI
-4. Restores original values after rephrasing
+### Protection Mechanism
+Critical elements (@mentions, #hashtags, URLs, numbers) are:
+1. Masked as `__PROTECTED_0__`, `__PROTECTED_1__`, etc.
+2. Sent safely through AI rephrasing
+3. Restored perfectly in the output
 
-This ensures critical elements are **never altered** by the AI.
+**Result:** Nearly impossible for spam filters to detect repeated messages.
 
 ## 🚀 Quick Deploy
 
@@ -214,11 +208,12 @@ User forwards message #3 (35 seconds later) → ✅ Processed
 ## 🔐 Security Features
 
 ### Channel Filtering
-Only processes messages forwarded from `@tweeterstormIranrevolution2026` by default.
+Restrict the bot to only process messages from specific channels.
 
-**To change:**
-- Set `ALLOWED_FORWARD_CHANNEL=yourchannel` in environment variables
-- Or leave empty to allow any channel
+**Configure:**
+- Set `ALLOWED_FORWARD_CHANNEL` in code or environment variables
+- Use channel username (without @) or channel ID
+- Leave empty to allow any channel
 
 ### Secret Validation
 - Webhook URL includes random secret path

@@ -40,14 +40,32 @@ user_last_request: Dict[int, float] = {}
 
 SYSTEM_INSTRUCTION = os.environ.get(
     "SYSTEM_INSTRUCTION",
-    "You are an assistant for my Telegram bot.\n"
-    "Task: rewrite the forwarded message in a different wording each time.\n"
-    "Hard rules:\n"
-    "- Preserve meaning.\n"
-    "- Preserve ALL @mentions, #hashtags, URLs, and numbers EXACTLY.\n"
-    "- Preserve names / proper nouns; if unsure, keep them unchanged.\n"
-    "- Preserve line breaks and overall structure.\n"
-    "- Output ONLY the rewritten message (no preface).",
+    "You are an assistant that rephrases messages to avoid spam detection.\n\n"
+    "CORE GOAL: The rephrased message must convey the EXACT same meaning but be "
+    "structurally and stylistically DIFFERENT from the original.\n\n"
+    "MUST PRESERVE EXACTLY (these will be marked as __PROTECTED_N__):\n"
+    "- All @mentions, #hashtags, URLs, and numbers\n"
+    "- Names of people, organizations, locations\n\n"
+    "MUST PRESERVE:\n"
+    "- Core message and meaning\n"
+    "- Key facts and claims\n"
+    "- Call-to-action intent\n\n"
+    "MUST VARY SIGNIFICANTLY:\n"
+    "- Sentence structure (reorder, combine, split sentences)\n"
+    "- Word choice (use synonyms, different phrasing)\n"
+    "- Paragraph structure (can reorder if logical)\n"
+    "- Sentence length and rhythm\n"
+    "- Transitional phrases\n"
+    "- Opening and closing\n\n"
+    "ALLOWED MODIFICATIONS:\n"
+    "- Remove filler words and redundancy\n"
+    "- Add natural connecting phrases\n"
+    "- Expand brief points with natural elaboration (without adding new facts)\n"
+    "- Compress verbose sections\n"
+    "- Change passive to active voice or vice versa\n"
+    "- Vary punctuation style\n"
+    "- Change from questions to statements or vice versa (if meaning preserved)\n\n"
+    "OUTPUT: Only the rewritten text, no preamble or explanation.",
 )
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "models/gemini-2.5-flash")
@@ -349,12 +367,64 @@ async def telegram_send_message(chat_id: int, text: str) -> None:
 
 
 def build_prompt(masked_text: str, style: str) -> str:
-    # Simpler prompt: ask for 1 complete rewrite to avoid truncation
+    # Multi-dimensional randomization for better spam evasion
+    
+    # Random structural changes
+    structure = random.choice([
+        "significantly restructure (reorder sentences/paragraphs if logical)",
+        "moderately restructure (reorder some clauses)",
+        "minimal restructure (keep mostly same order)"
+    ])
+    
+    # Random length variation
+    length = random.choice([
+        "make 20-30% shorter by removing filler",
+        "make 10-20% longer by expanding key points naturally",
+        "keep similar length but vary sentence lengths",
+        "compress into fewer sentences",
+        "break into more sentences"
+    ])
+    
+    # Random tone
+    tone = random.choice([
+        "very formal and academic",
+        "casual and friendly",
+        "urgent and direct",
+        "calm and measured",
+        "enthusiastic and energetic",
+        "matter-of-fact neutral"
+    ])
+    
+    # Random sentence structure
+    sentence_style = random.choice([
+        "use short, punchy sentences",
+        "use longer, flowing sentences",
+        "mix short and long sentences",
+        "start sentences differently each time",
+        "vary punctuation patterns"
+    ])
+    
+    # Random word strategy
+    word_strategy = random.choice([
+        "maximize synonym usage",
+        "prefer simpler/common words",
+        "prefer more sophisticated vocabulary",
+        "mix formal and informal words",
+        "use more action verbs",
+        "use more descriptive adjectives (sparingly)"
+    ])
+    
     return (
         f"{SYSTEM_INSTRUCTION}\n\n"
         "Important: The text contains placeholders like __PROTECTED_0__. "
         "You MUST keep every placeholder EXACTLY unchanged and in the correct position.\n\n"
-        f"Rewrite the following text with this style: {style}.\n\n"
+        "Rewrite with these requirements:\n"
+        f"- Structure: {structure}\n"
+        f"- Length: {length}\n"
+        f"- Tone: {tone}\n"
+        f"- Sentence style: {sentence_style}\n"
+        f"- Word choice: {word_strategy}\n"
+        f"- Additional style: {style}\n\n"
         "Output ONLY the rewritten text, nothing else. Do NOT truncate or cut off mid-sentence.\n\n"
         "Text:\n"
         f"{masked_text}"
@@ -370,9 +440,18 @@ def _parse_response(text: str) -> List[str]:
 
 
 def gemini_generate_candidates(prompt: str) -> List[str]:
-    # Randomness knobs (if supported by the installed google-genai version)
-    temperature = random.uniform(0.65, 0.95)
-    top_p = random.uniform(0.85, 0.95)
+    # Multi-level randomness strategy for better variation
+    randomness_level = random.choice(['conservative', 'moderate', 'aggressive'])
+    
+    if randomness_level == 'conservative':
+        temperature = random.uniform(0.6, 0.8)
+        top_p = random.uniform(0.85, 0.95)
+    elif randomness_level == 'moderate':
+        temperature = random.uniform(0.8, 1.1)
+        top_p = random.uniform(0.8, 0.95)
+    else:  # aggressive
+        temperature = random.uniform(1.1, 1.4)
+        top_p = random.uniform(0.7, 0.9)
 
     kwargs = {}
     if types is not None:
@@ -486,9 +565,17 @@ async def webhook(req: Request):
         rewritten = unmask(chosen, masked.placeholders).strip()
         print(f"DEBUG: After unmask: {rewritten}")
         
-        # Safety check: if rewritten is suspiciously shorter than original (likely truncated), use original
-        if not rewritten or len(rewritten) < len(user_text) * 0.6:
-            print(f"DEBUG: Response too short ({len(rewritten)} vs {len(user_text)}), using original")
+        # Relaxed safety check: Allow 30-200% of original length for variation
+        min_length = len(user_text) * 0.3
+        max_length = len(user_text) * 2.0
+        
+        if not rewritten or len(rewritten) < min_length:
+            # Only fallback if truly broken (less than 30% of original)
+            print(f"WARNING: Rewrite too short ({len(rewritten)} vs {len(user_text)}), using original")
+            rewritten = user_text.strip()
+        elif len(rewritten) > max_length:
+            # If way too long, might be hallucination - use original
+            print(f"WARNING: Rewrite too long ({len(rewritten)} vs {len(user_text)}), using original")
             rewritten = user_text.strip()
 
         # Telegram message limit safety
