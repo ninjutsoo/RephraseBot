@@ -356,6 +356,8 @@ def unmask(text: str, placeholders: List[Tuple[str, str]]) -> str:
     """
     Swaps placeholders back to original tags, ensuring they don't
     touch adjacent words by inserting a space only when necessary.
+    
+    This works on PLACEHOLDERS before unmasking to avoid corrupting the tags themselves.
     """
     for ph, original in placeholders:
         # 1. If there's a letter/number directly BEFORE the placeholder, add a space
@@ -368,12 +370,6 @@ def unmask(text: str, placeholders: List[Tuple[str, str]]) -> str:
 
         # Perform the actual replacement
         text = text.replace(ph, original)
-
-    # Final safety pass:
-    # - Ensure tags are not glued to words (only allow space/comma/@/#/end after a tag)
-    # - Ensure words are not glued to tags (space before tag if needed)
-    text = re.sub(r"([a-zA-Z0-9])([@#])", r"\1 \2", text)
-    text = re.sub(r"([@#][\w\d_]+)([a-zA-Z0-9])", r"\1 \2", text)
 
     return text
 
