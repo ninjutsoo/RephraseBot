@@ -466,7 +466,30 @@ def update_rate_limit(user_id: int) -> None:
     user_last_request[user_id] = time.time()
 
 
-async def telegram_send_message(chat_id: int, text: str) -> None:
+def extract_tweet_id(text: str) -> Optional[str]:
+    """
+    Extract tweet ID from X/Twitter URLs.
+    Supports formats:
+    - https://twitter.com/username/status/1234567890
+    - https://x.com/username/status/1234567890
+    - https://mobile.twitter.com/username/status/1234567890
+    """
+    pattern = r'(?:twitter\.com|x\.com|mobile\.twitter\.com)/(?:\w+)/status/(\d+)'
+    match = re.search(pattern, text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return None
+
+
+async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> None:
+    """
+    Send a message to a Telegram chat.
+    
+    Args:
+        chat_id: The chat ID to send to
+        text: The message text
+        reply_markup: Optional inline keyboard markup
+    """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -474,6 +497,9 @@ async def telegram_send_message(chat_id: int, text: str) -> None:
         "disable_web_page_preview": True,
         "allow_sending_without_reply": True,
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    
     async with httpx.AsyncClient(timeout=20) as http:
         r = await http.post(url, json=payload)
         r.raise_for_status()
@@ -655,28 +681,30 @@ async def webhook(req: Request):
     # Prefer text; fall back to caption (forwarded media captions).
     user_text = message.get("text") or message.get("caption") or ""
     if not user_text.strip():
-        await telegram_send_message(chat_id, "Forward a text message (or a media caption) to rephrase it.")
+        await telegram_send_message(chat_id, "Send a text message (or media caption) to rephrase it.")
         return {"ok": True}
 
     # Simple commands
     if user_text.strip().lower() in ("/start", "start"):
-        await telegram_send_message(chat_id, "Bot is running. Forward a message to rephrase it.")
+        await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
         return {"ok": True}
 
+    # TEMPORARILY DISABLED: Forward requirement
     # Only act on forwarded messages (per your requirement)
-    if not is_forwarded(message):
-        await telegram_send_message(chat_id, "Please forward a message to me, and I'll rephrase it.")
-        return {"ok": True}
+    # if not is_forwarded(message):
+    #     await telegram_send_message(chat_id, "Please forward a message to me, and I'll rephrase it.")
+    #     return {"ok": True}
     
+    # TEMPORARILY DISABLED: Channel restriction
     # Check if message is from allowed channel (if configured)
-    if not is_forwarded_from_allowed_channel(message):
-        if ALLOWED_FORWARD_CHANNEL:
-            await telegram_send_message(
-                chat_id, 
-                "⚠️ This bot is restricted to specific authorized sources.\n\n"
-                "Please ensure the message is forwarded from the correct channel."
-            )
-        return {"ok": True}
+    # if not is_forwarded_from_allowed_channel(message):
+    #     if ALLOWED_FORWARD_CHANNEL:
+    #         await telegram_send_message(
+    #             chat_id, 
+    #             "⚠️ This bot is restricted to specific authorized sources.\n\n"
+    #             "Please ensure the message is forwarded from the correct channel."
+    #         )
+    #     return {"ok": True}
     
     # Check rate limit (use from_user.id for user-specific limiting)
     user_id = (message.get("from") or {}).get("id")
@@ -809,7 +837,31 @@ async def webhook(req: Request):
         if len(final_message) > 3500:
             final_message = final_message[:3500] + "\n\n[truncated]"
 
-        await telegram_send_message(chat_id, final_message)
+        # Check if the original message contains an X/Twitter post link
+        tweet_id = extract_tweet_id(user_text)
+        reply_markup = None
+        
+        if tweet_id:
+            # Create X Web Intent URL with rephrased text pre-filled
+            from urllib.parse import quote
+            # URL-encode the rephrased message for X
+            encoded_reply = quote(final_message)
+            intent_url = f"https://twitter.com/intent/tweet?in_reply_to={tweet_id}&text={encoded_reply}"
+            
+            # Create inline keyboard button
+            reply_markup = {
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "🐦 Reply on X",
+                            "url": intent_url
+                        }
+                    ]
+                ]
+            }
+            print(f"DEBUG: Detected X post (tweet_id={tweet_id}), adding reply button")
+
+        await telegram_send_message(chat_id, final_message, reply_markup=reply_markup)
         
         # Update rate limit timestamp after successful processing
         if user_id:
