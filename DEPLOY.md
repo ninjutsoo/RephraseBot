@@ -34,10 +34,10 @@ In Render dashboard, go to your service → **Environment** tab → Add these:
 
 | Key | Value |
 |-----|-------|
-| `TELEGRAM_BOT_TOKEN` | `8485227725:AAEfdEheX_Y3s_VnCDKBqH8To4Qmz9ZbW5k` |
-| `GEMINI_API_KEY` | `AIzaSyBZ6KbHyhRnCNSobXIodsYGwmbjrk1taIg` |
-| `WEBHOOK_SECRET` | `whk_a7b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6` |
-| `TELEGRAM_WEBHOOK_SECRET_TOKEN` | `tgh_x9y8z7w6v5u4t3s2r1q0p9o8n7m6` |
+| `TELEGRAM_BOT_TOKEN` | Get from @BotFather on Telegram |
+| `GEMINI_API_KEY` | Get from https://aistudio.google.com/apikey |
+| `WEBHOOK_SECRET` | Any random string (e.g., `whk_` + random characters) |
+| `TELEGRAM_WEBHOOK_SECRET_TOKEN` | Any random string (e.g., `tgh_` + random characters) |
 
 Click **"Save Changes"**. Render will auto-deploy.
 
@@ -51,9 +51,9 @@ Click **"Save Changes"**. Render will auto-deploy.
 Run this in PowerShell (replace `YOUR_RENDER_URL`):
 
 ```powershell
-$BOT_TOKEN = "8485227725:AAEfdEheX_Y3s_VnCDKBqH8To4Qmz9ZbW5k"
-$WEBHOOK_URL = "https://YOUR_RENDER_URL.onrender.com/webhook/whk_a7b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
-$SECRET_TOKEN = "tgh_x9y8z7w6v5u4t3s2r1q0p9o8n7m6"
+$BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+$WEBHOOK_URL = "https://YOUR_RENDER_URL.onrender.com/webhook/YOUR_WEBHOOK_SECRET"
+$SECRET_TOKEN = "YOUR_TELEGRAM_WEBHOOK_SECRET_TOKEN"
 
 Invoke-RestMethod -Uri "https://api.telegram.org/bot$BOT_TOKEN/setWebhook" `
   -Method Post `
