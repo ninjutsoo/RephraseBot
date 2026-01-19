@@ -47,6 +47,11 @@ SYSTEM_INSTRUCTION = os.environ.get(
     "NEVER exceed 280 characters.\n\n"
     "CORE GOAL: The rephrased message must convey the EXACT same meaning but be "
     "structurally and stylistically DIFFERENT from the original.\n\n"
+    "NUANCE PRESERVATION (CRITICAL):\n"
+    "- Preserve the original intent/sentiment exactly. Do not flip 'victims' to 'actors'.\n"
+    "- Example: 'People have no voice' means they are oppressed/silenced, NOT that they 'stayed silent' by choice.\n"
+    "- Example: 'Regime killed X' -> Keep it active/accusatory. Do not soften it to 'X died'.\n"
+    "- If a phrase is metaphorical, keep the metaphor's meaning, not just the words.\n\n"
     "MENTION/TAG HANDLING (CRITICAL):\n"
     "- Do NOT change the role of @mentions. If a mention is used as a tag (e.g. at start/end), keep it as a tag.\n"
     "- IF a message starts with a block of @mentions, KEEP them at the start. Do not weave them into the sentence.\n"
@@ -81,7 +86,7 @@ SYSTEM_INSTRUCTION = os.environ.get(
     "OUTPUT: Only the rewritten text, no preamble or explanation.",
 )
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "models/gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "models/gemini-3-flash")
 
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY)
