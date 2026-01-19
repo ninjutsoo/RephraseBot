@@ -232,6 +232,86 @@ class MaskedText:
     placeholders: List[Tuple[str, str]]  # (placeholder, original)
 
 
+def extract_tag_blocks(text: str) -> Tuple[str, str, str]:
+    """
+    Separates a message into (start_tags, content, end_tags).
+    start_tags: continuous block of mentions/hashtags at the very beginning
+    end_tags: continuous block of mentions/hashtags at the very end
+    content: the middle part to be rephrased
+    
+    Example:
+    "@User1 Hi there #tag" -> ("@User1 ", "Hi there", " #tag")
+    """
+    # Tokenize by splitting on whitespace, but keep delimiters to reconstruct
+    # Actually, simpler: Use regex to find prefix/suffix blocks
+    
+    # Pattern for a tag line/block:
+    # A block is a sequence of (@mention|#hashtag) separated by whitespace
+    
+    # We'll tokenize and peel off from start and end
+    tokens = text.split()
+    if not tokens:
+        return "", "", ""
+        
+    def is_tag(t):
+        return t.startswith("@") or t.startswith("#")
+        
+    # Find start block
+    start_idxs = []
+    for i, t in enumerate(tokens):
+        if is_tag(t):
+            start_idxs.append(i)
+        else:
+            break
+            
+    # Find end block
+    end_idxs = []
+    for i in range(len(tokens) - 1, -1, -1):
+        if i < len(start_idxs): # Don't overlap
+            break
+        if is_tag(tokens[i]):
+            end_idxs.append(i)
+        else:
+            break
+    end_idxs.reverse()
+    
+    # Reconstruct strings based on original text is tricky with simple split.
+    # Better strategy: Regex match for "leading tags" and "trailing tags"
+    
+    # Regex to match a tag plus following whitespace
+    # ^(\s*([@#][\w\d_]+)\s+)*
+    
+    # Let's try a safer index-based slice on the original string
+    # We need to identify the character boundaries of the content.
+    
+    # 1. Leading tags
+    # Match start of string, optional whitespace, then repeated (tag + whitespace)
+    leading_pattern = re.compile(r"^\s*((?:[@#][\w\d_]+\s*)+)", re.DOTALL)
+    trailing_pattern = re.compile(r"((?:\s*[@#][\w\d_]+)+)\s*$", re.DOTALL)
+    
+    start_block = ""
+    end_block = ""
+    content = text
+    
+    m_start = leading_pattern.match(text)
+    if m_start:
+        start_block = m_start.group(1)
+        content = text[m_start.end():]
+        
+    m_end = trailing_pattern.search(content)
+    if m_end:
+        # Check if the whole remaining content is tags (overlap case)
+        # If content is empty or just whitespace, we shouldn't strip end too
+        if not content.strip():
+             # Already captured in start, or effectively empty
+             pass
+        else:
+            end_block = m_end.group(1)
+            content = content[:m_end.start()]
+            
+    return start_block, content, end_block
+
+
 def _merge_spans(spans: Iterable[Tuple[int, int]]) -> List[Tuple[int, int]]:
     ordered = sorted(spans, key=lambda s: (s[0], s[1]))
     if not ordered:
@@ -379,7 +459,7 @@ async def telegram_send_message(chat_id: int, text: str) -> None:
         r.raise_for_status()
 
 
-def build_prompt(masked_text: str, style: str, force_short: bool = False) -> str:
+def build_prompt(masked_text: str, style: str, force_short: bool = False, max_chars: int = 280) -> str:
     # Multi-dimensional randomization for better spam evasion
     
     # Random structural changes
@@ -392,24 +472,24 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False) -> str
     # Random length variation
     # Logic: If strict shortening needed (retry) OR original is close to limit, force shorter options.
     if force_short:
-        length = "CRITICAL: MAKE IT SHORTER. Remove filler words. Condense sentences. STRICTLY UNDER 280 CHARS."
-    elif len(masked_text) > 250:
+        length = f"CRITICAL: MAKE IT SHORTER. Remove filler words. Condense sentences. STRICTLY UNDER {max_chars} CHARS."
+    elif len(masked_text) > (max_chars - 30):
         # Very close to limit: ONLY allow shortening
         length = random.choice([
             "make 20-30% shorter by removing filler",
             "compress into fewer sentences",
-            "condense strictly to fit under 280 chars"
+            f"condense strictly to fit under {max_chars} chars"
         ])
-    elif len(masked_text) > 220:
+    elif len(masked_text) > (max_chars - 60):
         # Moderately close: Allow shortening or keeping same length
         length = random.choice([
             "make 20-30% shorter by removing filler",
             "compress into fewer sentences",
-            "condense strictly to fit under 280 chars",
+            f"condense strictly to fit under {max_chars} chars",
             "keep similar length but vary sentence lengths"
         ])
     else:
-        # Safe zone (< 220 chars): Allow expansion
+        # Safe zone: Allow expansion
         length = random.choice([
             "make 20-30% shorter by removing filler",
             "make 10-20% longer by expanding key points naturally",
@@ -458,7 +538,7 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False) -> str
         f"- Sentence style: {sentence_style}\n"
         f"- Word choice: {word_strategy}\n"
         f"- Additional style: {style}\n"
-        "- MAX LENGTH: 280 characters (strict)\n\n"
+        f"- MAX LENGTH: {max_chars} characters (strict)\n\n"
         "Output ONLY the rewritten text, nothing else. Do NOT truncate or cut off mid-sentence.\n\n"
         "Text:\n"
         f"{masked_text}"
@@ -580,12 +660,29 @@ async def webhook(req: Request):
             )
             return {"ok": True}
 
-    masked = mask_protected(user_text)
+    # Split tags from content to prevent AI from messing them up
+    start_tags, content_body, end_tags = extract_tag_blocks(user_text)
+    
+    if not content_body.strip():
+        # Edge case: Message is ONLY tags. Just return original.
+        await telegram_send_message(chat_id, user_text)
+        return {"ok": True}
+
+    # Calculate available space for the body
+    overhead = len(start_tags) + len(end_tags)
+    available_chars = 280 - overhead
+    
+    if available_chars < 10:
+         # Too many tags, can't rephrase safely. Return original.
+         await telegram_send_message(chat_id, user_text)
+         return {"ok": True}
+
+    masked = mask_protected(content_body)
     style = random.choice(STYLES)
     # Prompt is built inside the loop to allow modification on retry
 
     try:
-        rewritten = ""
+        rewritten_body = ""
         
         # Retry logic: Attempt 1 (Standard) -> Check -> Attempt 2 (Strict Shortening)
         max_attempts = 2
@@ -594,13 +691,14 @@ async def webhook(req: Request):
             # If this is a retry (attempt_idx > 0), force strict shortening
             force_short = (attempt_idx > 0)
             
-            current_prompt = build_prompt(masked.masked, style=style, force_short=force_short)
+            # Pass available_chars to build_prompt
+            current_prompt = build_prompt(masked.masked, style=style, force_short=force_short, max_chars=available_chars)
             
             if force_short:
-                print(f"DEBUG: Output too long ({len(rewritten)} chars). Retrying with strict length constraint.")
+                print(f"DEBUG: Output too long ({len(rewritten_body)} chars). Retrying with strict length constraint.")
                 current_prompt += (
-                    f"\n\nSYSTEM ALERT: Your previous output was {len(rewritten)} characters long."
-                    "\nMAXIMUM ALLOWED IS 280 CHARACTERS."
+                    f"\n\nSYSTEM ALERT: Your previous output was {len(rewritten_body)} characters long."
+                    f"\nMAXIMUM ALLOWED IS {available_chars} CHARACTERS."
                     "\nREWRITE IT NOW TO BE SIGNIFICANTLY SHORTER."
                 )
             
@@ -616,21 +714,24 @@ async def webhook(req: Request):
             good = [c for c in candidates if contains_all_placeholders(c, masked.placeholders)]
             chosen = random.choice(good or candidates).strip()
             
-            temp_rewritten = unmask(chosen, masked.placeholders).strip()
+            temp_rewritten_body = unmask(chosen, masked.placeholders).strip()
             
-            if len(temp_rewritten) <= 280:
-                rewritten = temp_rewritten
-                print(f"DEBUG: Success on attempt {attempt_idx+1} ({len(rewritten)} chars)")
+            if len(temp_rewritten_body) <= available_chars:
+                rewritten_body = temp_rewritten_body
+                print(f"DEBUG: Success on attempt {attempt_idx+1} ({len(rewritten_body)} chars)")
                 break
             
             # Keep the best effort so far
-            rewritten = temp_rewritten
+            rewritten_body = temp_rewritten_body
+        
+        # Reassemble final message
+        final_message = start_tags + rewritten_body + end_tags
         
         # If still over 280 after retries, log warning
-        if len(rewritten) > 280:
-            print(f"WARNING: Failed to get under 280 chars after {max_attempts} attempts. Final length: {len(rewritten)}")
+        if len(final_message) > 280:
+            print(f"WARNING: Failed to get under 280 chars after {max_attempts} attempts. Final length: {len(final_message)}")
 
-        print(f"DEBUG: Final output: {rewritten}")
+        print(f"DEBUG: Final output: {final_message}")
         
         # Relaxed safety check: Allow 30-200% of original length for variation
         # EXCEPTION: If original > 280 and rewritten <= 280, allow it even if < 30% (successful compression)
@@ -638,37 +739,33 @@ async def webhook(req: Request):
         max_length = len(user_text) * 2.0
         
         is_compression_attempt = len(user_text) > 280
-        is_successful_compression = (is_compression_attempt and len(rewritten) <= 280)
+        is_successful_compression = (is_compression_attempt and len(final_message) <= 280)
         
         # If we are trying to compress for X, accept the result if it's shorter than original
         # and at least 10 chars long, ignoring the 30% min_length rule.
         if is_compression_attempt:
-             if len(rewritten) < 10:
+             if len(final_message) < 10:
                  print("WARNING: Rewrite too short/empty, using original")
-                 rewritten = user_text.strip()
+                 final_message = user_text.strip()
              # Else: Keep rewritten (even if 290 chars, better than 1000)
         
-        elif (not rewritten or len(rewritten) < min_length):
+        elif (not final_message or len(final_message) < min_length):
             # Only fallback if truly broken (less than 30% of original)
-            print(f"WARNING: Rewrite too short ({len(rewritten)} vs {len(user_text)}), using original")
-            rewritten = user_text.strip()
-        elif len(rewritten) > max_length:
+            print(f"WARNING: Rewrite too short ({len(final_message)} vs {len(user_text)}), using original")
+            final_message = user_text.strip()
+        elif len(final_message) > max_length:
             # If way too long, might be hallucination - use original
-            print(f"WARNING: Rewrite too long ({len(rewritten)} vs {len(user_text)}), using original")
-            rewritten = user_text.strip()
+            print(f"WARNING: Rewrite too long ({len(final_message)} vs {len(user_text)}), using original")
+            final_message = user_text.strip()
 
         # Telegram message limit safety
-        if len(rewritten) > 280:
-             print(f"WARNING: Output exceeded 280 chars ({len(rewritten)}), truncating/checking.")
-             # We can't easily truncate without cutting words, so we'll leave it 
-             # but log it. Or strictly cut it if you prefer.
-             # For now, let's trust the AI but add a visual warning if testing manually.
-             pass
+        if len(final_message) > 280:
+             print(f"WARNING: Output exceeded 280 chars ({len(final_message)}), truncating/checking.")
 
-        if len(rewritten) > 3500:
-            rewritten = rewritten[:3500] + "\n\n[truncated]"
+        if len(final_message) > 3500:
+            final_message = final_message[:3500] + "\n\n[truncated]"
 
-        await telegram_send_message(chat_id, rewritten)
+        await telegram_send_message(chat_id, final_message)
         
         # Update rate limit timestamp after successful processing
         if user_id:
