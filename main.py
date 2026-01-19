@@ -1,8 +1,9 @@
 import os
 import random
 import re
+import time
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, Request
@@ -30,6 +31,12 @@ TELEGRAM_WEBHOOK_SECRET_TOKEN = os.environ.get("TELEGRAM_WEBHOOK_SECRET_TOKEN")
 # Optional: Only rephrase messages forwarded from a specific channel
 # Can be channel username (e.g., "mychannel") or channel ID (e.g., "-1001234567890")
 ALLOWED_FORWARD_CHANNEL = os.environ.get("ALLOWED_FORWARD_CHANNEL", "tweeterstormIranrevolution2026")
+
+# Rate limiting: seconds a user must wait between requests
+RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "30"))
+
+# In-memory storage for rate limiting (user_id -> last_request_timestamp)
+user_last_request: Dict[int, float] = {}
 
 SYSTEM_INSTRUCTION = os.environ.get(
     "SYSTEM_INSTRUCTION",
@@ -296,6 +303,38 @@ def is_forwarded_from_allowed_channel(message: dict) -> bool:
     return False
 
 
+def check_rate_limit(user_id: int) -> Optional[int]:
+    """
+    Check if user is rate limited.
+    Returns None if allowed, or seconds remaining if rate limited.
+    """
+    if RATE_LIMIT_SECONDS <= 0:
+        # Rate limiting disabled
+        return None
+    
+    current_time = time.time()
+    last_request_time = user_last_request.get(user_id)
+    
+    if last_request_time is None:
+        # First request from this user
+        return None
+    
+    time_elapsed = current_time - last_request_time
+    
+    if time_elapsed < RATE_LIMIT_SECONDS:
+        # Still rate limited
+        seconds_remaining = int(RATE_LIMIT_SECONDS - time_elapsed) + 1
+        return seconds_remaining
+    
+    # Rate limit expired
+    return None
+
+
+def update_rate_limit(user_id: int) -> None:
+    """Record the current timestamp for this user."""
+    user_last_request[user_id] = time.time()
+
+
 async def telegram_send_message(chat_id: int, text: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -415,6 +454,18 @@ async def webhook(req: Request):
                 f"Please forward a message from that channel to use this bot."
             )
         return {"ok": True}
+    
+    # Check rate limit (use from_user.id for user-specific limiting)
+    user_id = (message.get("from") or {}).get("id")
+    if user_id:
+        seconds_remaining = check_rate_limit(user_id)
+        if seconds_remaining is not None:
+            await telegram_send_message(
+                chat_id,
+                f"⏱️ Please wait {seconds_remaining} second{'s' if seconds_remaining != 1 else ''} before sending another message.\n\n"
+                f"Rate limit: 1 message per {RATE_LIMIT_SECONDS} seconds."
+            )
+            return {"ok": True}
 
     masked = mask_protected(user_text)
     style = random.choice(STYLES)
@@ -445,6 +496,10 @@ async def webhook(req: Request):
             rewritten = rewritten[:3500] + "\n\n[truncated]"
 
         await telegram_send_message(chat_id, rewritten)
+        
+        # Update rate limit timestamp after successful processing
+        if user_id:
+            update_rate_limit(user_id)
 
     except Exception as exc:
         import traceback
