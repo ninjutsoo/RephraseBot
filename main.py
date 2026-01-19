@@ -59,12 +59,16 @@ SYSTEM_INSTRUCTION = os.environ.get(
     "- Do NOT make a mention the subject/actor if it wasn't one (e.g. don't change '@POTUS...' to '@POTUS said...').\n"
     "- Keep mentions and hashtags in their approximate original positions (start vs end) if possible, or integrate naturally without changing meaning.\n\n"
     "MUST PRESERVE EXACTLY (these will be marked as __PROTECTED_N__):\n"
-    "- All @mentions, #hashtags, URLs, and numbers\n"
-    "- Names of people, organizations, locations\n\n"
+    "- All @mentions and #hashtags\n\n"
+    "SHOULD PRESERVE (naturally, not as placeholders):\n"
+    "- Names of people, organizations, locations\n"
+    "- Numbers and dates\n"
+    "- Key facts and specific details\n\n"
     "MUST PRESERVE:\n"
     "- Core message and meaning\n"
-    "- Key facts and claims\n"
-    "- Call-to-action intent\n\n"
+    "- Key facts, claims, and specific details\n"
+    "- Call-to-action intent\n"
+    "- Context and references (e.g., 'people of Iran', '20,000 people')\n\n"
     "HARD LIMIT:\n"
     "- The final output MUST be under 280 characters (Twitter/X limit).\n"
     "- If the original is longer, condense it intelligently while keeping key info.\n\n"
@@ -220,12 +224,8 @@ STYLES: List[str] = [
 
 PROTECTED_PATTERN = re.compile(
     r"("  # capture each token
-    r"https?://\S+|"  # URLs
-    r"t\.me/\S+|"  # Telegram short links
-    r"@\w{1,64}|"  # @mentions
-    r"#\w+|"  # hashtags
-    r"\$[A-Za-z]{2,}|"  # cashtags-ish
-    r"\b\d+(?:[.,:/-]\d+)*\b"  # numbers/dates/times-ish
+    r"@\w{1,64}|"  # @mentions (e.g., @POTUS, @username)
+    r"#\w+"  # hashtags (e.g., #IranRevolution2026)
     r")",
     flags=re.IGNORECASE,
 )
@@ -371,6 +371,10 @@ def unmask(text: str, placeholders: List[Tuple[str, str]]) -> str:
         # Perform the actual replacement
         text = text.replace(ph, original)
 
+    # SAFETY: Remove any leftover unreplaced placeholders (AI hallucinations)
+    # This catches cases where AI generates __PROTECTED_N__ that don't exist
+    text = re.sub(r'__PROTECTED_\d+__\s*', '', text)
+    
     return text
 
 
@@ -581,10 +585,25 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
         "use more descriptive adjectives (sparingly)"
     ])
     
+    # Check if there are placeholders in the text
+    has_placeholders = "__PROTECTED_" in masked_text
+    placeholder_instruction = ""
+    if has_placeholders:
+        placeholder_instruction = (
+            "CRITICAL: The text contains placeholders like __PROTECTED_0__, __PROTECTED_1__, etc. "
+            "You MUST keep every placeholder EXACTLY as-is in your output. "
+            "Do NOT create new placeholders. Do NOT remove existing placeholders. "
+            "Do NOT modify placeholders in any way.\n\n"
+        )
+    else:
+        placeholder_instruction = (
+            "CRITICAL: Do NOT add any placeholders like __PROTECTED_0__ to your output. "
+            "Write natural text only.\n\n"
+        )
+    
     return (
         f"{SYSTEM_INSTRUCTION}\n\n"
-        "Important: The text contains placeholders like __PROTECTED_0__. "
-        "You MUST keep every placeholder EXACTLY unchanged and in the correct position.\n\n"
+        f"{placeholder_instruction}"
         "Rewrite with these requirements:\n"
         f"- Structure: {structure}\n"
         f"- Length: {length}\n"
