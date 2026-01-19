@@ -49,6 +49,8 @@ SYSTEM_INSTRUCTION = os.environ.get(
     "structurally and stylistically DIFFERENT from the original.\n\n"
     "MENTION/TAG HANDLING (CRITICAL):\n"
     "- Do NOT change the role of @mentions. If a mention is used as a tag (e.g. at start/end), keep it as a tag.\n"
+    "- IF a message starts with a block of @mentions, KEEP them at the start. Do not weave them into the sentence.\n"
+    "- IF a message ends with a block of tags/mentions, KEEP them at the end.\n"
     "- Do NOT make a mention the subject/actor if it wasn't one (e.g. don't change '@POTUS...' to '@POTUS said...').\n"
     "- Keep mentions and hashtags in their approximate original positions (start vs end) if possible, or integrate naturally without changing meaning.\n\n"
     "MUST PRESERVE EXACTLY (these will be marked as __PROTECTED_N__):\n"
@@ -377,7 +379,7 @@ async def telegram_send_message(chat_id: int, text: str) -> None:
         r.raise_for_status()
 
 
-def build_prompt(masked_text: str, style: str) -> str:
+def build_prompt(masked_text: str, style: str, force_short: bool = False) -> str:
     # Multi-dimensional randomization for better spam evasion
     
     # Random structural changes
@@ -388,14 +390,19 @@ def build_prompt(masked_text: str, style: str) -> str:
     ])
     
     # Random length variation
-    # Ensure we don't accidentally ask for longer text if it's already long
-    if len(masked_text) > 200:
+    # Logic: If strict shortening needed (retry) OR original is close to limit, force shorter options.
+    if force_short:
+        length = "CRITICAL: MAKE IT SHORTER. Remove filler words. Condense sentences. STRICTLY UNDER 280 CHARS."
+    elif len(masked_text) > 240:
+        # Original is already close to limit, so NEVER ask to make it longer
         length = random.choice([
             "make 20-30% shorter by removing filler",
             "compress into fewer sentences",
-            "condense strictly to fit under 280 chars"
+            "condense strictly to fit under 280 chars",
+            "keep similar length but vary sentence lengths"
         ])
     else:
+        # Original is short enough to allow expansion
         length = random.choice([
             "make 20-30% shorter by removing filler",
             "make 10-20% longer by expanding key points naturally",
@@ -568,7 +575,7 @@ async def webhook(req: Request):
 
     masked = mask_protected(user_text)
     style = random.choice(STYLES)
-    base_prompt = build_prompt(masked.masked, style=style)
+    # Prompt is built inside the loop to allow modification on retry
 
     try:
         rewritten = ""
@@ -577,18 +584,17 @@ async def webhook(req: Request):
         max_attempts = 2
         
         for attempt_idx in range(max_attempts):
-            current_prompt = base_prompt
+            # If this is a retry (attempt_idx > 0), force strict shortening
+            force_short = (attempt_idx > 0)
             
-            # If this is a retry (attempt_idx > 0), add the strict shortening instruction
-            if attempt_idx > 0:
+            current_prompt = build_prompt(masked.masked, style=style, force_short=force_short)
+            
+            if force_short:
                 print(f"DEBUG: Output too long ({len(rewritten)} chars). Retrying with strict length constraint.")
                 current_prompt += (
                     f"\n\nSYSTEM ALERT: Your previous output was {len(rewritten)} characters long."
                     "\nMAXIMUM ALLOWED IS 280 CHARACTERS."
                     "\nREWRITE IT NOW TO BE SIGNIFICANTLY SHORTER."
-                    "\n- Remove ALL filler words."
-                    "\n- Condense the main point."
-                    "\n- Keep mentions/hashtags but simplify the text around them."
                 )
             
             candidates = gemini_generate_candidates(current_prompt)
