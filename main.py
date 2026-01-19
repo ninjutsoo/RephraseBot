@@ -865,20 +865,32 @@ async def webhook(req: Request):
             
             # URL-encode the clean rephrased message for X
             encoded_reply = quote(clean_reply)
-            intent_url = f"https://twitter.com/intent/tweet?in_reply_to={tweet_id}&text={encoded_reply}"
             
-            # Create inline keyboard button
+            # Reply intent: Opens X reply composer with text pre-filled
+            reply_intent_url = f"https://twitter.com/intent/tweet?in_reply_to={tweet_id}&text={encoded_reply}"
+            
+            # Quote tweet intent: Opens X quote tweet composer with text pre-filled
+            # For quote tweets, we append the original tweet URL to the text
+            original_tweet_url = f"https://twitter.com/i/status/{tweet_id}"
+            encoded_quote_url = quote(original_tweet_url)
+            quote_intent_url = f"https://twitter.com/intent/tweet?text={encoded_reply}&url={encoded_quote_url}"
+            
+            # Create inline keyboard with two buttons (Reply and Quote)
             reply_markup = {
                 "inline_keyboard": [
                     [
                         {
-                            "text": "🐦 Reply on X",
-                            "url": intent_url
+                            "text": "💬 Reply on X",
+                            "url": reply_intent_url
+                        },
+                        {
+                            "text": "🔁 Quote on X",
+                            "url": quote_intent_url
                         }
                     ]
                 ]
             }
-            print(f"DEBUG: Adding X reply button (tweet_id={tweet_id}) with clean text ({len(clean_reply)} chars)")
+            print(f"DEBUG: Adding X buttons (tweet_id={tweet_id}) - Reply & Quote with clean text ({len(clean_reply)} chars)")
             
             # For X posts, show the clean reply text in Telegram too (without the X link)
             final_message = clean_reply
