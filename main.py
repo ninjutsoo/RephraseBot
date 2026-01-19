@@ -27,6 +27,10 @@ WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]  # random string you choose
 # Optional hardening: Telegram secret header check
 TELEGRAM_WEBHOOK_SECRET_TOKEN = os.environ.get("TELEGRAM_WEBHOOK_SECRET_TOKEN")
 
+# Optional: Only rephrase messages forwarded from a specific channel
+# Can be channel username (e.g., "mychannel") or channel ID (e.g., "-1001234567890")
+ALLOWED_FORWARD_CHANNEL = os.environ.get("ALLOWED_FORWARD_CHANNEL", "tweeterstormIranrevolution2026")
+
 SYSTEM_INSTRUCTION = os.environ.get(
     "SYSTEM_INSTRUCTION",
     "You are an assistant for my Telegram bot.\n"
@@ -252,6 +256,46 @@ def is_forwarded(message: dict) -> bool:
     )
 
 
+def is_forwarded_from_allowed_channel(message: dict) -> bool:
+    """Check if message is forwarded from the allowed channel (if configured)."""
+    if not ALLOWED_FORWARD_CHANNEL:
+        # No restriction - allow all forwarded messages
+        return True
+    
+    # Check forward_origin (newer API format)
+    forward_origin = message.get("forward_origin")
+    if forward_origin:
+        if forward_origin.get("type") == "channel":
+            chat = forward_origin.get("chat", {})
+            channel_id = str(chat.get("id", ""))
+            channel_username = chat.get("username", "").lower()
+            
+            # Match by ID or username
+            allowed = ALLOWED_FORWARD_CHANNEL.lower()
+            if allowed.startswith("-") or allowed.isdigit():
+                # Matching by ID
+                return channel_id == ALLOWED_FORWARD_CHANNEL
+            else:
+                # Matching by username (without @ prefix)
+                allowed = allowed.lstrip("@")
+                return channel_username == allowed
+    
+    # Check forward_from_chat (older API format)
+    forward_from_chat = message.get("forward_from_chat")
+    if forward_from_chat and forward_from_chat.get("type") == "channel":
+        channel_id = str(forward_from_chat.get("id", ""))
+        channel_username = forward_from_chat.get("username", "").lower()
+        
+        allowed = ALLOWED_FORWARD_CHANNEL.lower()
+        if allowed.startswith("-") or allowed.isdigit():
+            return channel_id == ALLOWED_FORWARD_CHANNEL
+        else:
+            allowed = allowed.lstrip("@")
+            return channel_username == allowed
+    
+    return False
+
+
 async def telegram_send_message(chat_id: int, text: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -359,7 +403,17 @@ async def webhook(req: Request):
 
     # Only act on forwarded messages (per your requirement)
     if not is_forwarded(message):
-        await telegram_send_message(chat_id, "Please forward a message to me, and I’ll rephrase it.")
+        await telegram_send_message(chat_id, "Please forward a message to me, and I'll rephrase it.")
+        return {"ok": True}
+    
+    # Check if message is from allowed channel (if configured)
+    if not is_forwarded_from_allowed_channel(message):
+        if ALLOWED_FORWARD_CHANNEL:
+            await telegram_send_message(
+                chat_id, 
+                f"⚠️ This bot only works with messages forwarded from @{ALLOWED_FORWARD_CHANNEL}.\n\n"
+                f"Please forward a message from that channel to use this bot."
+            )
         return {"ok": True}
 
     masked = mask_protected(user_text)
