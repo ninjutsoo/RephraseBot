@@ -33,7 +33,8 @@ TELEGRAM_WEBHOOK_SECRET_TOKEN = os.environ.get("TELEGRAM_WEBHOOK_SECRET_TOKEN")
 ALLOWED_FORWARD_CHANNEL = os.environ.get("ALLOWED_FORWARD_CHANNEL", "tweeterstormIranrevolution2026")
 
 # Rate limiting: seconds a user must wait between requests
-RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "30"))
+# Set to 0 to disable rate limiting
+RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "0"))
 
 # In-memory storage for rate limiting (user_id -> last_request_timestamp)
 user_last_request: Dict[int, float] = {}

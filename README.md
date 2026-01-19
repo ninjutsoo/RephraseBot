@@ -33,7 +33,7 @@ This bot helps you share the same message multiple times without triggering spam
 
 ### 🔐 **Security & Control**
 - **Channel filtering**: Only processes messages from specific Telegram channels
-- **Rate limiting**: 30-second cooldown per user (configurable)
+- **Rate limiting**: Optional cooldown per user (disabled by default)
 - **Webhook authentication**: Secret token validation
 - **No data storage**: Processes messages in-memory only
 
@@ -126,7 +126,7 @@ uvicorn main:app --reload
 |----------|---------|-------------|
 | `TELEGRAM_WEBHOOK_SECRET_TOKEN` | None | Secret token for webhook verification |
 | `ALLOWED_FORWARD_CHANNEL` | (Set in code) | Channel username or ID to restrict forwarding from |
-| `RATE_LIMIT_SECONDS` | `30` | Cooldown time between user requests (0 to disable) |
+| `RATE_LIMIT_SECONDS` | `0` | Cooldown time between user requests (0 = disabled) |
 | `SYSTEM_INSTRUCTION` | See `main.py` | Custom AI rephrasing instructions |
 | `GEMINI_MODEL` | `models/gemini-2.5-flash` | Gemini model to use |
 
@@ -188,20 +188,11 @@ curl -s "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 
 ---
 
-## 🛡️ Rate Limiting
+## 🛡️ Rate Limiting (Optional)
 
-**Default:** 30 seconds between messages per user
+**Default:** Disabled (0 seconds)
 
-**User Experience:**
-```
-User forwards message #1 → ✅ Processed
-User forwards message #2 (5 seconds later) → ❌ "⏱️ Please wait 25 seconds..."
-User forwards message #3 (35 seconds later) → ✅ Processed
-```
-
-**Configure:**
-- Set `RATE_LIMIT_SECONDS=60` for 1 minute cooldown
-- Set `RATE_LIMIT_SECONDS=0` to disable (not recommended)
+To enable rate limiting, set `RATE_LIMIT_SECONDS` to your desired cooldown (e.g., `30` for 30 seconds).
 
 ---
 
