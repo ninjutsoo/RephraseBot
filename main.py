@@ -492,7 +492,7 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
         # Safe zone: Allow expansion
         length = random.choice([
             "make 20-30% shorter by removing filler",
-            "make 10-20% longer by expanding key points naturally",
+            f"make 10-20% longer by expanding key points naturally (BUT UNDER {max_chars} CHARS)",
             "keep similar length but vary sentence lengths",
             "compress into fewer sentences",
             "break into more sentences"
@@ -541,7 +541,8 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
         f"- MAX LENGTH: {max_chars} characters (strict)\n\n"
         "Output ONLY the rewritten text, nothing else. Do NOT truncate or cut off mid-sentence.\n\n"
         "Text:\n"
-        f"{masked_text}"
+        f"{masked_text}\n\n"
+        f"REMINDER: OUTPUT MUST BE UNDER {max_chars} CHARACTERS."
     )
 
 
@@ -564,7 +565,8 @@ def gemini_generate_candidates(prompt: str) -> List[str]:
         temperature = random.uniform(0.8, 1.1)
         top_p = random.uniform(0.8, 0.95)
     else:  # aggressive
-        temperature = random.uniform(1.1, 1.4)
+        # Reduced max from 1.4 to 1.25 to improve instruction following (length limits)
+        temperature = random.uniform(1.1, 1.25)
         top_p = random.uniform(0.7, 0.9)
 
     kwargs = {}
