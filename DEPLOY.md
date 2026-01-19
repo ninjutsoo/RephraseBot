@@ -39,7 +39,7 @@ In Render dashboard, go to your service → **Environment** tab → Add these:
 | `WEBHOOK_SECRET` | Any random string (e.g., `whk_` + random characters) |
 | `TELEGRAM_WEBHOOK_SECRET_TOKEN` | Any random string (e.g., `tgh_` + random characters) |
 | `ALLOWED_FORWARD_CHANNEL` | **(Optional)** Channel username (without @) or ID. Default: `tweeterstormIranrevolution2026` |
-| `RATE_LIMIT_SECONDS` | **(Optional)** Cooldown between messages per user. Default: `30` seconds |
+| `RATE_LIMIT_SECONDS` | **(Optional)** Cooldown between messages per user. Default: `0` (disabled) |
 
 Click **"Save Changes"**. Render will auto-deploy.
 
