@@ -42,8 +42,15 @@ user_last_request: Dict[int, float] = {}
 SYSTEM_INSTRUCTION = os.environ.get(
     "SYSTEM_INSTRUCTION",
     "You are an assistant that rephrases messages to avoid spam detection.\n\n"
+    "CRITICAL HARD LIMIT: The final output MUST be under 280 characters.\n"
+    "If the message is long, you MUST condense it, remove filler, and summarize to fit.\n"
+    "NEVER exceed 280 characters.\n\n"
     "CORE GOAL: The rephrased message must convey the EXACT same meaning but be "
     "structurally and stylistically DIFFERENT from the original.\n\n"
+    "MENTION/TAG HANDLING (CRITICAL):\n"
+    "- Do NOT change the role of @mentions. If a mention is used as a tag (e.g. at start/end), keep it as a tag.\n"
+    "- Do NOT make a mention the subject/actor if it wasn't one (e.g. don't change '@POTUS...' to '@POTUS said...').\n"
+    "- Keep mentions and hashtags in their approximate original positions (start vs end) if possible, or integrate naturally without changing meaning.\n\n"
     "MUST PRESERVE EXACTLY (these will be marked as __PROTECTED_N__):\n"
     "- All @mentions, #hashtags, URLs, and numbers\n"
     "- Names of people, organizations, locations\n\n"
@@ -381,13 +388,21 @@ def build_prompt(masked_text: str, style: str) -> str:
     ])
     
     # Random length variation
-    length = random.choice([
-        "make 20-30% shorter by removing filler",
-        "make 10-20% longer by expanding key points naturally",
-        "keep similar length but vary sentence lengths",
-        "compress into fewer sentences",
-        "break into more sentences"
-    ])
+    # Ensure we don't accidentally ask for longer text if it's already long
+    if len(masked_text) > 200:
+        length = random.choice([
+            "make 20-30% shorter by removing filler",
+            "compress into fewer sentences",
+            "condense strictly to fit under 280 chars"
+        ])
+    else:
+        length = random.choice([
+            "make 20-30% shorter by removing filler",
+            "make 10-20% longer by expanding key points naturally",
+            "keep similar length but vary sentence lengths",
+            "compress into fewer sentences",
+            "break into more sentences"
+        ])
     
     # Random tone
     tone = random.choice([
@@ -553,32 +568,75 @@ async def webhook(req: Request):
 
     masked = mask_protected(user_text)
     style = random.choice(STYLES)
-    prompt = build_prompt(masked.masked, style=style)
+    base_prompt = build_prompt(masked.masked, style=style)
 
     try:
-        candidates = gemini_generate_candidates(prompt)
-        print(f"DEBUG: Got {len(candidates)} candidates: {candidates}")
-        if not candidates:
-            raise RuntimeError("no_candidates")
+        rewritten = ""
+        
+        # Retry logic: Attempt 1 (Standard) -> Check -> Attempt 2 (Strict Shortening)
+        max_attempts = 2
+        
+        for attempt_idx in range(max_attempts):
+            current_prompt = base_prompt
+            
+            # If this is a retry (attempt_idx > 0), add the strict shortening instruction
+            if attempt_idx > 0:
+                print(f"DEBUG: Output too long ({len(rewritten)} chars). Retrying with strict length constraint.")
+                current_prompt += (
+                    f"\n\nSYSTEM ALERT: Your previous output was {len(rewritten)} characters long."
+                    "\nMAXIMUM ALLOWED IS 280 CHARACTERS."
+                    "\nREWRITE IT NOW TO BE SIGNIFICANTLY SHORTER."
+                    "\n- Remove ALL filler words."
+                    "\n- Condense the main point."
+                    "\n- Keep mentions/hashtags but simplify the text around them."
+                )
+            
+            candidates = gemini_generate_candidates(current_prompt)
+            print(f"DEBUG: Got {len(candidates)} candidates")
+            
+            if not candidates:
+                if attempt_idx == max_attempts - 1:
+                    raise RuntimeError("no_candidates")
+                continue
 
-        # Prefer candidates that preserved all placeholders so we don't corrupt tags/links.
-        good = [c for c in candidates if contains_all_placeholders(c, masked.placeholders)]
-        print(f"DEBUG: {len(good)} good candidates (with all placeholders)")
-        chosen = random.choice(good or candidates).strip()
-        print(f"DEBUG: Chosen candidate: {chosen}")
+            # Prefer candidates that preserved all placeholders so we don't corrupt tags/links.
+            good = [c for c in candidates if contains_all_placeholders(c, masked.placeholders)]
+            chosen = random.choice(good or candidates).strip()
+            
+            temp_rewritten = unmask(chosen, masked.placeholders).strip()
+            
+            if len(temp_rewritten) <= 280:
+                rewritten = temp_rewritten
+                print(f"DEBUG: Success on attempt {attempt_idx+1} ({len(rewritten)} chars)")
+                break
+            
+            # Keep the best effort so far
+            rewritten = temp_rewritten
+        
+        # If still over 280 after retries, log warning
+        if len(rewritten) > 280:
+            print(f"WARNING: Failed to get under 280 chars after {max_attempts} attempts. Final length: {len(rewritten)}")
 
-        rewritten = unmask(chosen, masked.placeholders).strip()
-        print(f"DEBUG: After unmask: {rewritten}")
+        print(f"DEBUG: Final output: {rewritten}")
         
         # Relaxed safety check: Allow 30-200% of original length for variation
         # EXCEPTION: If original > 280 and rewritten <= 280, allow it even if < 30% (successful compression)
         min_length = len(user_text) * 0.3
         max_length = len(user_text) * 2.0
         
-        is_compression_success = (len(user_text) > 280 and len(rewritten) <= 280)
+        is_compression_attempt = len(user_text) > 280
+        is_successful_compression = (is_compression_attempt and len(rewritten) <= 280)
         
-        if (not rewritten or len(rewritten) < min_length) and not is_compression_success:
-            # Only fallback if truly broken (less than 30% of original AND not a valid compression)
+        # If we are trying to compress for X, accept the result if it's shorter than original
+        # and at least 10 chars long, ignoring the 30% min_length rule.
+        if is_compression_attempt:
+             if len(rewritten) < 10:
+                 print("WARNING: Rewrite too short/empty, using original")
+                 rewritten = user_text.strip()
+             # Else: Keep rewritten (even if 290 chars, better than 1000)
+        
+        elif (not rewritten or len(rewritten) < min_length):
+            # Only fallback if truly broken (less than 30% of original)
             print(f"WARNING: Rewrite too short ({len(rewritten)} vs {len(user_text)}), using original")
             rewritten = user_text.strip()
         elif len(rewritten) > max_length:
