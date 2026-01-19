@@ -867,13 +867,16 @@ async def webhook(req: Request):
             encoded_reply = quote(clean_reply)
             
             # Reply intent: Opens X reply composer with text pre-filled
+            # Note: Web Intent API still uses twitter.com domain (official X API endpoint)
             reply_intent_url = f"https://twitter.com/intent/tweet?in_reply_to={tweet_id}&text={encoded_reply}"
             
-            # Quote tweet intent: Opens X quote tweet composer with text pre-filled
-            # For quote tweets, we append the original tweet URL to the text
-            original_tweet_url = f"https://twitter.com/i/status/{tweet_id}"
-            encoded_quote_url = quote(original_tweet_url)
-            quote_intent_url = f"https://twitter.com/intent/tweet?text={encoded_reply}&url={encoded_quote_url}"
+            # Quote tweet intent: Include the tweet URL directly in the text
+            # X automatically converts tweet URLs to embedded quote cards
+            # Using x.com domain (current X platform standard)
+            original_tweet_url = f"https://x.com/i/status/{tweet_id}"
+            quote_text_with_url = f"{clean_reply} {original_tweet_url}"
+            encoded_quote_text = quote(quote_text_with_url)
+            quote_intent_url = f"https://twitter.com/intent/tweet?text={encoded_quote_text}"
             
             # Create inline keyboard with two buttons (Reply and Quote)
             reply_markup = {
