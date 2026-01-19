@@ -688,6 +688,17 @@ async def webhook(req: Request):
     if user_text.strip().lower() in ("/start", "start"):
         await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
         return {"ok": True}
+    
+    # Check if message contains X/Twitter link (early detection)
+    tweet_id = extract_tweet_id(user_text)
+    original_text_with_link = user_text  # Keep original for context
+    
+    # If X link detected, remove it from the text before rephrasing
+    if tweet_id:
+        # Remove X/Twitter URLs from the text
+        pattern = r'https?://(?:twitter\.com|x\.com|mobile\.twitter\.com)/\S+\s*'
+        user_text = re.sub(pattern, '', user_text, flags=re.IGNORECASE).strip()
+        print(f"DEBUG: Detected X link (tweet_id={tweet_id}), removed URL from text for rephrasing")
 
     # TEMPORARILY DISABLED: Forward requirement
     # Only act on forwarded messages (per your requirement)
@@ -837,15 +848,23 @@ async def webhook(req: Request):
         if len(final_message) > 3500:
             final_message = final_message[:3500] + "\n\n[truncated]"
 
-        # Check if the original message contains an X/Twitter post link
-        tweet_id = extract_tweet_id(user_text)
+        # If X link was detected earlier, create reply button with ONLY the rephrased text
         reply_markup = None
         
         if tweet_id:
-            # Create X Web Intent URL with rephrased text pre-filled
+            # Create X Web Intent URL with rephrased text pre-filled (without X link)
             from urllib.parse import quote
-            # URL-encode the rephrased message for X
-            encoded_reply = quote(final_message)
+            
+            # Ensure final_message doesn't contain any X links
+            clean_reply = re.sub(
+                r'https?://(?:twitter\.com|x\.com|mobile\.twitter\.com)/\S+\s*',
+                '',
+                final_message,
+                flags=re.IGNORECASE
+            ).strip()
+            
+            # URL-encode the clean rephrased message for X
+            encoded_reply = quote(clean_reply)
             intent_url = f"https://twitter.com/intent/tweet?in_reply_to={tweet_id}&text={encoded_reply}"
             
             # Create inline keyboard button
@@ -859,7 +878,10 @@ async def webhook(req: Request):
                     ]
                 ]
             }
-            print(f"DEBUG: Detected X post (tweet_id={tweet_id}), adding reply button")
+            print(f"DEBUG: Adding X reply button (tweet_id={tweet_id}) with clean text ({len(clean_reply)} chars)")
+            
+            # For X posts, show the clean reply text in Telegram too (without the X link)
+            final_message = clean_reply
 
         await telegram_send_message(chat_id, final_message, reply_markup=reply_markup)
         
