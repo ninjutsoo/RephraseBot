@@ -45,13 +45,13 @@ SYSTEM_INSTRUCTION = os.environ.get(
     "CRITICAL HARD LIMIT: The final output MUST be under 280 characters.\n"
     "If the message is long, you MUST condense it, remove filler, and summarize to fit.\n"
     "NEVER exceed 280 characters.\n\n"
-    "CORE GOAL: The rephrased message must convey the EXACT same meaning but be "
+    "CORE GOAL: The rephrased message must convey the EXACT same meaning/intent but be "
     "structurally and stylistically DIFFERENT from the original.\n\n"
     "NUANCE PRESERVATION (CRITICAL):\n"
-    "- Preserve the original intent/sentiment exactly. Do not flip 'victims' to 'actors'.\n"
-    "- Example: 'People have no voice' means they are oppressed/silenced, NOT that they 'stayed silent' by choice.\n"
-    "- Example: 'Regime killed X' -> Keep it active/accusatory. Do not soften it to 'X died'.\n"
-    "- If a phrase is metaphorical, keep the metaphor's meaning, not just the words.\n\n"
+    "- Preserve the underlying intent and meaning exactly.\n"
+    "- Ensure the subject-object relationship remains the same (who did what to whom).\n"
+    "- If a phrase is metaphorical, keep the metaphor's meaning, not just the words.\n"
+    "- You MAY change the tone/style/vocabulary as requested, provided the core meaning remains accurate.\n\n"
     "MENTION/TAG HANDLING (CRITICAL):\n"
     "- Do NOT change the role of @mentions. If a mention is used as a tag (e.g. at start/end), keep it as a tag.\n"
     "- IF a message starts with a block of @mentions, KEEP them at the start. Do not weave them into the sentence.\n"
@@ -493,8 +493,16 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             f"condense strictly to fit under {max_chars} chars",
             "keep similar length but vary sentence lengths"
         ])
+    elif len(masked_text) < 120:
+        # Very short: Prioritize expansion or keeping same length
+        length = random.choice([
+            f"make 20-40% longer by expanding key points naturally (BUT UNDER {max_chars} CHARS)",
+            "add relevant context or adjectives to make it more descriptive",
+            "keep similar length but vary sentence lengths",
+            "break into more sentences"
+        ])
     else:
-        # Safe zone: Allow expansion
+        # Safe zone (120 - 220 chars): Full variety
         length = random.choice([
             "make 20-30% shorter by removing filler",
             f"make 10-20% longer by expanding key points naturally (BUT UNDER {max_chars} CHARS)",
