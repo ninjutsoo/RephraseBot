@@ -1,18 +1,18 @@
-# Deploy Your Telegram Bot to Render (Free, 24/7)
+# Deploy Your Rephrase Bot (Fast & Scalable)
 
-## 🚀 Quick Deploy (5 minutes, no Git needed)
+## 🚀 Quick Deploy (5 minutes)
 
 ### Step 1: Create GitHub Repository
 
 1. Go to https://github.com/new
-2. Repository name: `FreeIranXBot` (or any name)
-3. Set to **Private** (keeps your code safe)
+2. Repository name: `MyRephraseBot` (or any name)
+3. Set to **Private** (recommended)
 4. Click **"Create repository"**
 
 ### Step 2: Upload Your Code
 
 1. On the new repo page, click **"uploading an existing file"**
-2. Drag and drop these files from `C:\Users\mrosh\OneDrive\Desktop\FreeIranXBot`:
+2. Upload these files from your project folder:
    - `main.py`
    - `requirements.txt`
    - `render.yaml`
@@ -20,82 +20,61 @@
    - `.gitignore`
 3. Click **"Commit changes"**
 
-### Step 3: Deploy to Render
+### Step 3: Deploy to Cloud Provider
 
-1. Go to https://render.com/
-2. Click **"Get Started for Free"** → Sign up with GitHub
-3. After signup, click **"New +"** → **"Web Service"**
-4. Click **"Connect GitHub"** → Select your `FreeIranXBot` repo
-5. Render will auto-detect `render.yaml`. Click **"Apply"**
+1. Connect your GitHub repository to your preferred hosting service (e.g., Render).
+2. The deployment will be auto-detected via `render.yaml`.
 
 ### Step 4: Add Environment Variables
 
-In Render dashboard, go to your service → **Environment** tab → Add these:
+In your service dashboard, add these variables:
 
 | Key | Value |
 |-----|-------|
 | `TELEGRAM_BOT_TOKEN` | Get from @BotFather on Telegram |
-| `GEMINI_API_KEY` | Get from https://aistudio.google.com/apikey |
+| `GEMINI_API_KEY` | Get from your AI provider console |
 | `WEBHOOK_SECRET` | Any random string (e.g., `whk_` + random characters) |
 | `TELEGRAM_WEBHOOK_SECRET_TOKEN` | Any random string (e.g., `tgh_` + random characters) |
-| `ALLOWED_FORWARD_CHANNEL` | **(Optional)** Channel username (without @) or ID. Default: `tweeterstormIranrevolution2026` |
+| `ALLOWED_FORWARD_CHANNEL` | **(Optional)** Channel username (without @) or ID to restrict sources. |
 | `RATE_LIMIT_SECONDS` | **(Optional)** Cooldown between messages per user. Default: `0` (disabled) |
 
-Click **"Save Changes"**. Render will auto-deploy.
+Click **"Save Changes"**. The service will auto-deploy.
 
-### Step 5: Get Your Render URL
+### Step 5: Update Telegram Webhook
 
-1. Wait ~2 minutes for deployment to finish
-2. Copy your service URL (looks like: `https://freeiranxbot.onrender.com`)
+Run this in your terminal (replace `YOUR_SERVICE_URL` and `YOUR_BOT_TOKEN`):
 
-### Step 6: Update Telegram Webhook
-
-Run this in PowerShell (replace `YOUR_RENDER_URL`):
-
-```powershell
+```bash
 $BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-$WEBHOOK_URL = "https://YOUR_RENDER_URL.onrender.com/webhook/YOUR_WEBHOOK_SECRET"
+$WEBHOOK_URL = "https://YOUR_SERVICE_URL.com/webhook/YOUR_WEBHOOK_SECRET"
 $SECRET_TOKEN = "YOUR_TELEGRAM_WEBHOOK_SECRET_TOKEN"
 
+# For PowerShell:
 Invoke-RestMethod -Uri "https://api.telegram.org/bot$BOT_TOKEN/setWebhook" `
   -Method Post `
   -Body @{url=$WEBHOOK_URL; secret_token=$SECRET_TOKEN}
 ```
 
 Verify:
-```powershell
+```bash
 Invoke-RestMethod -Uri "https://api.telegram.org/bot$BOT_TOKEN/getWebhookInfo"
 ```
 
-### Step 7: Test!
+### Step 6: Test!
 
-Forward a message to your bot in Telegram. It should reply instantly with a rephrased version!
+Forward a message from an authorized channel to your bot. It should reply with a rephrased version!
 
 ---
 
 ## 🔒 Security Note
 
-**After deploying, you should:**
-1. Regenerate your Telegram bot token via @BotFather
-2. Create a new Gemini API key
-3. Update both in Render's environment variables
-4. Update the webhook URL with the new token
-
-This prevents the keys you posted in chat from being misused.
-
----
-
-## ⚙️ Render Free Tier Limits
-
-- ✅ **750 hours/month** (enough for 24/7 operation)
-- ⚠️ Service spins down after 15 min inactivity (wakes up in ~30s on first request)
-- ✅ Auto-redeploys when you push to GitHub
-
-To keep it "warm" (prevent spin-down), use a free uptime monitor like:
-- https://uptimerobot.com/ (ping your bot every 5 minutes)
+**If your keys are ever exposed:**
+1. Regenerate your Telegram bot token via @BotFather.
+2. Rotate your AI API keys.
+3. Update environment variables in your hosting dashboard immediately.
 
 ---
 
 ## 🎉 Done!
 
-Your bot is now running 24/7 on Render's free tier. No credit card, no payment needed!
+Your bot is now running and ready to process messages.

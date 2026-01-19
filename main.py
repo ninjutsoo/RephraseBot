@@ -30,7 +30,7 @@ TELEGRAM_WEBHOOK_SECRET_TOKEN = os.environ.get("TELEGRAM_WEBHOOK_SECRET_TOKEN")
 
 # Optional: Only rephrase messages forwarded from a specific channel
 # Can be channel username (e.g., "mychannel") or channel ID (e.g., "-1001234567890")
-ALLOWED_FORWARD_CHANNEL = os.environ.get("ALLOWED_FORWARD_CHANNEL", "tweeterstormIranrevolution2026")
+ALLOWED_FORWARD_CHANNEL = os.environ.get("ALLOWED_FORWARD_CHANNEL")
 
 # Rate limiting: seconds a user must wait between requests
 # Set to 0 to disable rate limiting
@@ -658,8 +658,8 @@ async def webhook(req: Request):
         if ALLOWED_FORWARD_CHANNEL:
             await telegram_send_message(
                 chat_id, 
-                f"⚠️ This bot only works with messages forwarded from @{ALLOWED_FORWARD_CHANNEL}.\n\n"
-                f"Please forward a message from that channel to use this bot."
+                "⚠️ This bot is restricted to specific authorized sources.\n\n"
+                "Please ensure the message is forwarded from the correct channel."
             )
         return {"ok": True}
     
@@ -792,4 +792,3 @@ async def webhook(req: Request):
         await telegram_send_message(chat_id, f"Error: {type(exc).__name__} - {str(exc)[:100]}")
 
     return {"ok": True}
-
