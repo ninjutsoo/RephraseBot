@@ -353,10 +353,29 @@ def mask_protected(text: str) -> MaskedText:
 
 
 def unmask(text: str, placeholders: List[Tuple[str, str]]) -> str:
-    out = text
+    """
+    Swaps placeholders back to original tags, ensuring they don't
+    touch adjacent words by inserting a space only when necessary.
+    """
     for ph, original in placeholders:
-        out = out.replace(ph, original)
-    return out
+        # 1. If there's a letter/number directly BEFORE the placeholder, add a space
+        # Example: "Thanks__PROTECTED_0__" -> "Thanks __PROTECTED_0__"
+        text = re.sub(rf"([a-zA-Z0-9])({re.escape(ph)})", r"\1 \2", text)
+
+        # 2. If there's a letter/number directly AFTER the placeholder, add a space
+        # Example: "__PROTECTED_0__thanks" -> "__PROTECTED_0__ thanks"
+        text = re.sub(rf"({re.escape(ph)})([a-zA-Z0-9])", r"\1 \2", text)
+
+        # Perform the actual replacement
+        text = text.replace(ph, original)
+
+    # Final safety pass:
+    # - Ensure tags are not glued to words (only allow space/comma/@/#/end after a tag)
+    # - Ensure words are not glued to tags (space before tag if needed)
+    text = re.sub(r"([a-zA-Z0-9])([@#])", r"\1 \2", text)
+    text = re.sub(r"([@#][\w\d_]+)([a-zA-Z0-9])", r"\1 \2", text)
+
+    return text
 
 
 def contains_all_placeholders(text: str, placeholders: List[Tuple[str, str]]) -> bool:
@@ -739,8 +758,22 @@ async def webhook(req: Request):
             # Keep the best effort so far
             rewritten_body = temp_rewritten_body
         
-        # Reassemble final message
-        final_message = start_tags + rewritten_body + end_tags
+        # Reassemble final message with guaranteed spacing
+        start_tags_clean = start_tags.rstrip()
+        end_tags_clean = end_tags.lstrip()
+        rewritten_body_clean = rewritten_body.strip()
+        
+        final_message = start_tags_clean
+        if start_tags_clean and rewritten_body_clean:
+            # Ensure space/newline between start tags and body
+            final_message += " "
+        final_message += rewritten_body_clean
+        
+        if end_tags_clean:
+            if final_message:
+                # Ensure space/newline before end tags
+                final_message += " "
+            final_message += end_tags_clean
         
         # If still over 280 after retries, log warning
         if len(final_message) > 280:
