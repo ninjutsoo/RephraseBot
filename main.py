@@ -86,7 +86,7 @@ SYSTEM_INSTRUCTION = os.environ.get(
     "OUTPUT: Only the rewritten text, no preamble or explanation.",
 )
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "models/gemini-3-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "models/gemini-2.0-flash")
 
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY)
