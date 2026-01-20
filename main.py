@@ -1036,9 +1036,9 @@ async def webhook(req: Request):
                 final_message += " "
             final_message += end_tags_clean
         
-        # If still over 280 after retries, log warning
+        # If still over 280 after candidate selection, log warning
         if len(final_message) > 280:
-            print(f"WARNING: Failed to get under 280 chars after {max_attempts} attempts. Final length: {len(final_message)}")
+            print(f"WARNING: Output exceeded 280 chars. Final length: {len(final_message)}")
 
         print(f"DEBUG: Final output: {final_message}")
         
