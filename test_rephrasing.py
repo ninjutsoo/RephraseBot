@@ -29,9 +29,12 @@ def test_message(original_text: str, test_num: int):
     print(f"{original_text}")
     print(f"\n{'-'*80}")
     
-    # Step 1: Extract tag blocks (with random removal applied)
-    start_tags, content_body, end_tags = extract_tag_blocks(original_text, apply_random_removal=True)
-    print(f"\nEXTRACTED TAGS (with random 40% removal on sequences):")
+    # Step 0: Apply random tag removal to entire text first
+    text_with_removed_tags = original_text  # In real bot, apply_random_tag_removal() is called
+    
+    # Step 1: Extract tag blocks
+    start_tags, content_body, end_tags = extract_tag_blocks(text_with_removed_tags)
+    print(f"\nEXTRACTED TAGS:")
     print(f"  START: '{start_tags}'")
     print(f"  CONTENT: '{content_body}'")
     print(f"  END: '{end_tags}'")
@@ -53,14 +56,14 @@ def test_message(original_text: str, test_num: int):
     for ph, orig in masked.placeholders:
         print(f"  {ph} -> {orig}")
     
-    # Step 4: Generate 5 candidates and select best by similarity
-    print(f"\nGENERATING 5 CANDIDATES...")
+    # Step 4: Generate 2 candidates and select best by similarity
+    print(f"\nGENERATING 2 CANDIDATES...")
     
     try:
         all_candidates = []
         
-        # Generate 5 candidates with different styles
-        for candidate_num in range(5):
+        # Generate 2 candidates with different styles
+        for candidate_num in range(2):
             style = random.choice(STYLES)
             print(f"\n  Candidate {candidate_num + 1} - Style: {style}")
             

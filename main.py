@@ -2,13 +2,14 @@ import os
 import random
 import re
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from math import sqrt
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, Request
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Gemini (Google AI / google-genai)
 from google import genai
@@ -90,7 +91,40 @@ def calculate_text_similarity(original: str, rephrased: str) -> float:
     return min(1.0, max(0.0, combined_score))
 
 
+# Global rate limiting to protect server from overload
+request_times = deque(maxlen=1000)
+MAX_REQUESTS_PER_SECOND = 15  # Adjust based on server capacity
+
+class GlobalRateLimitMiddleware(BaseHTTPMiddleware):
+    """
+    Server-level rate limiting to prevent overload.
+    Limits total requests across ALL users to protect server resources.
+    """
+    async def dispatch(self, request: Request, call_next):
+        # Only apply to webhook endpoint
+        if "/webhook/" not in str(request.url):
+            return await call_next(request)
+        
+        now = time.time()
+        
+        # Remove requests older than 1 second
+        while request_times and now - request_times[0] > 1.0:
+            request_times.popleft()
+        
+        # Check if we're over the limit
+        if len(request_times) >= MAX_REQUESTS_PER_SECOND:
+            # Silently accept (Telegram will handle retries)
+            # Don't process the request to save resources
+            return {"ok": True}
+        
+        request_times.append(now)
+        return await call_next(request)
+
+
 app = FastAPI()
+
+# Add global rate limiting middleware
+app.add_middleware(GlobalRateLimitMiddleware)
 
 # Required env vars
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
