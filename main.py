@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import re
@@ -99,10 +100,36 @@ class GlobalRateLimitMiddleware(BaseHTTPMiddleware):
     """
     Server-level rate limiting to prevent overload.
     Limits total requests across ALL users to protect server resources.
+    Exempt users (RATE_LIMIT_EXEMPT_USERS) bypass this limit.
     """
     async def dispatch(self, request: Request, call_next):
         # Only apply to webhook endpoint
         if "/webhook/" not in str(request.url):
+            return await call_next(request)
+        
+        # Check if user is exempt from rate limiting
+        is_exempt = False
+        try:
+            # Read request body to check user_id (without consuming it permanently)
+            body_bytes = await request.body()
+            update = json.loads(body_bytes)
+            message = update.get("message") or update.get("edited_message")
+            user_id = (message.get("from") or {}).get("id") if message else None
+            
+            # If user is exempt, bypass global rate limit
+            if user_id and user_id in EXEMPT_USER_IDS:
+                is_exempt = True
+                print(f"DEBUG: User {user_id} is exempt from global rate limiting")
+        except Exception as e:
+            # If parsing fails, continue with normal rate limiting
+            print(f"DEBUG: Error parsing request for exemption check: {e}")
+        
+        # Exempt users bypass the global rate limit
+        if is_exempt:
+            # Restore request body for downstream handlers
+            async def receive():
+                return {"type": "http.request", "body": body_bytes}
+            request._receive = receive
             return await call_next(request)
         
         now = time.time()
@@ -111,13 +138,23 @@ class GlobalRateLimitMiddleware(BaseHTTPMiddleware):
         while request_times and now - request_times[0] > 1.0:
             request_times.popleft()
         
-        # Check if we're over the limit
+        # Check if we're over the limit (only for non-exempt users)
         if len(request_times) >= MAX_REQUESTS_PER_SECOND:
             # Silently accept (Telegram will handle retries)
             # Don't process the request to save resources
             return {"ok": True}
         
         request_times.append(now)
+        
+        # Restore request body for downstream handlers
+        try:
+            if 'body_bytes' in locals():
+                async def receive():
+                    return {"type": "http.request", "body": body_bytes}
+                request._receive = receive
+        except:
+            pass
+        
         return await call_next(request)
 
 
@@ -850,6 +887,10 @@ async def webhook(req: Request):
     if chat_id is None:
         return {"ok": True}
 
+    # Get user_id early to check for exemptions
+    user_id = (message.get("from") or {}).get("id")
+    is_exempt_user = user_id and user_id in EXEMPT_USER_IDS
+
     # Prefer text; fall back to caption (forwarded media captions).
     user_text = message.get("text") or message.get("caption") or ""
     if not user_text.strip():
@@ -872,25 +913,23 @@ async def webhook(req: Request):
         user_text = re.sub(pattern, '', user_text, flags=re.IGNORECASE).strip()
         print(f"DEBUG: Detected X link (tweet_id={tweet_id}), removed URL from text for rephrasing")
 
-    # TEMPORARILY DISABLED: Forward requirement
-    # Only act on forwarded messages (per your requirement)
-    # if not is_forwarded(message):
-    #     await telegram_send_message(chat_id, "Please forward a message to me, and I'll rephrase it.")
-    #     return {"ok": True}
-    
-    # TEMPORARILY DISABLED: Channel restriction
-    # Check if message is from allowed channel (if configured)
-    # if not is_forwarded_from_allowed_channel(message):
-    #     if ALLOWED_FORWARD_CHANNEL:
-    #         await telegram_send_message(
-    #             chat_id, 
-    #             "⚠️ This bot is restricted to specific authorized sources.\n\n"
-    #             "Please ensure the message is forwarded from the correct channel."
-    #         )
-    #     return {"ok": True}
+    # Forward requirement: Only act on forwarded messages (exempt users bypass this)
+    if not is_exempt_user:
+        if not is_forwarded(message):
+            await telegram_send_message(chat_id, "Please forward a message to me, and I'll rephrase it.")
+            return {"ok": True}
+        
+        # Channel restriction: Check if message is from allowed channel (if configured)
+        if ALLOWED_FORWARD_CHANNEL:
+            if not is_forwarded_from_allowed_channel(message):
+                await telegram_send_message(
+                    chat_id, 
+                    "⚠️ This bot is restricted to specific authorized sources.\n\n"
+                    "Please ensure the message is forwarded from the correct channel."
+                )
+                return {"ok": True}
     
     # Check rate limit (use from_user.id for user-specific limiting)
-    user_id = (message.get("from") or {}).get("id")
     if user_id:
         seconds_remaining = check_rate_limit(user_id)
         if seconds_remaining is not None:
