@@ -34,7 +34,12 @@ ALLOWED_FORWARD_CHANNEL = os.environ.get("ALLOWED_FORWARD_CHANNEL")
 
 # Rate limiting: seconds a user must wait between requests
 # Set to 0 to disable rate limiting
-RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "0"))
+RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "30"))
+
+# Rate limit exemption: User IDs that bypass rate limiting (comma-separated)
+# Example: "123456789,987654321"
+RATE_LIMIT_EXEMPT_USERS = os.environ.get("RATE_LIMIT_EXEMPT_USERS", "")
+EXEMPT_USER_IDS = set(int(uid.strip()) for uid in RATE_LIMIT_EXEMPT_USERS.split(",") if uid.strip())
 
 # In-memory storage for rate limiting (user_id -> last_request_timestamp)
 user_last_request: Dict[int, float] = {}
@@ -444,7 +449,12 @@ def check_rate_limit(user_id: int) -> Optional[int]:
     Returns None if allowed, or seconds remaining if rate limited.
     """
     if RATE_LIMIT_SECONDS <= 0:
-        # Rate limiting disabled
+        # Rate limiting disabled globally
+        return None
+    
+    # Check if user is exempt from rate limiting
+    if user_id in EXEMPT_USER_IDS:
+        print(f"DEBUG: User {user_id} is exempt from rate limiting")
         return None
     
     current_time = time.time()
