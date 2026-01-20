@@ -153,17 +153,9 @@ user_last_request: Dict[int, float] = {}
 SYSTEM_INSTRUCTION = os.environ.get(
     "SYSTEM_INSTRUCTION",
     "You are an assistant that aggressively rephrases messages to avoid spam detection while maintaining core intent.\n\n"
-    "CRITICAL HARD LIMIT: The final output MUST be under 280 characters.\n"
-    "Length can vary significantly - make it much shorter, longer, or same length as needed.\n"
-    "NEVER exceed 280 characters.\n\n"
+    "CRITICAL HARD LIMIT: The final output MUST be under 280 characters. NEVER exceed this limit.\n\n"
     "CORE GOAL: The rephrased message must convey the SAME core meaning/intent but be "
     "structurally and stylistically VERY DIFFERENT from the original.\n\n"
-    "AGGRESSIVE REPHRASING APPROACH:\n"
-    "- Be bold in restructuring - completely rewrite sentence order, combine/split ideas\n"
-    "- Use very different vocabulary and phrasing throughout\n"
-    "- Change the tone, style, and approach dramatically\n"
-    "- Make it sound like a completely different person wrote it\n"
-    "- Length can be 30-200% of original length (very flexible)\n\n"
     "INTENT PRESERVATION (ESSENTIAL):\n"
     "- Keep the fundamental message and purpose intact\n"
     "- Maintain subject-object relationships (who did what to whom)\n"
@@ -185,24 +177,6 @@ SYSTEM_INSTRUCTION = os.environ.get(
     "- Core message and meaning\n"
     "- General claims and their direction\n"
     "- Call-to-action intent\n\n"
-    "HARD LIMIT:\n"
-    "- The final output MUST be under 280 characters (Twitter/X limit).\n"
-    "- Length can vary dramatically - be aggressive in making it shorter or longer as needed.\n\n"
-    "AGGRESSIVE VARIATION REQUIRED:\n"
-    "- Complete sentence restructuring (reorder, combine, split radically)\n"
-    "- Maximum vocabulary change (synonyms, different expressions)\n"
-    "- Dramatic style changes (formal↔casual, direct↔indirect, etc.)\n"
-    "- Different sentence length patterns\n"
-    "- New transitional phrases and connectors\n"
-    "- Completely different opening and closing approaches\n\n"
-    "ALLOWED MODIFICATIONS (be aggressive):\n"
-    "- Remove ALL filler words and redundancy aggressively\n"
-    "- Add or remove connecting phrases as needed\n"
-    "- Expand or compress sections dramatically\n"
-    "- Change voice, tense, and structure freely\n"
-    "- Vary punctuation dramatically\n"
-    "- Change between questions/statements/freestyle as needed\n"
-    "- Be much more concise or much more elaborate than original\n\n"
     "OUTPUT: Only the rewritten text, no preamble or explanation.",
 )
 
@@ -213,128 +187,117 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 STYLES: List[str] = [
-    "slightly more formal",
-    "slightly more casual",
-    "more concise",
-    "slightly more detailed but not longer than the original",
-    "active voice where possible",
-    "neutral tone, newsroom style",
-    "friendly tone",
-    "direct and punchy",
-    "calm and diplomatic",
-    "empathetic but concise",
-    "confident tone without exaggeration",
-    "avoid filler words",
-    "avoid clichés",
-    "avoid slang",
-    "lightly conversational",
-    "professional tone",
-    "simple everyday language",
-    "clear and structured",
-    "keep rhythm similar to original",
-    "keep punctuation pattern similar to original",
-    "keep sentence count similar to original",
-    "use synonyms where safe",
-    "reorder clauses when safe",
-    "slightly more persuasive",
-    "slightly more neutral",
-    "slightly more assertive",
-    "slightly softer/less harsh",
-    "sound like a helpful moderator",
-    "sound like a clear announcer",
-    "sound like a careful editor",
-    "sound like a pragmatic planner",
-    "sound like a concise spokesperson",
-    "sound like a friendly teammate",
-    "sound like a calm advisor",
-    "sound like a factual reporter",
-    "sound like a polite reminder",
-    "sound like a brief update",
-    "sound like a short note",
-    "sound like a message to a group chat",
-    "avoid changing emphasis",
-    "keep emotional intensity the same",
-    "keep urgency level the same",
-    "keep hedging/certainty level the same",
-    "avoid changing intent",
-    "avoid adding new claims",
-    "avoid removing any key detail",
-    "prefer shorter words",
-    "prefer clearer verbs",
-    "avoid repeating the same word",
-    "vary sentence starters",
-    "smooth transitions",
-    "tighten phrasing",
-    "remove redundancy",
-    "slightly more polished",
-    "slightly more raw/unfiltered but respectful",
-    "avoid passive constructions",
-    "use mild parallelism",
-    "keep formatting as-is (bullets/lines)",
-    "keep emojis exactly as-is",
-    "keep capitalization pattern similar",
-    "keep abbreviations unchanged",
-    "keep quoted text unchanged",
-    "keep parentheticals unchanged",
-    "keep dates unchanged",
-    "keep times unchanged",
-    "keep locations unchanged (do not rename)",
-    "keep organization names unchanged",
-    "keep person names unchanged",
-    "keep product names unchanged",
-    "keep usernames unchanged",
-    "keep hashtags unchanged",
-    "keep links unchanged",
-    "keep numbers unchanged",
-    "prefer simple punctuation",
-    "avoid extra exclamation points",
-    "avoid extra question marks",
-    "do not add emojis",
-    "do not add hashtags",
-    "do not add @mentions",
-    "avoid rhetorical questions",
-    "avoid moralizing",
-    "avoid inflammatory language",
-    "avoid charged adjectives",
-    "slightly more respectful",
-    "slightly more optimistic",
-    "slightly more cautious",
-    "slightly more urgent",
-    "slightly more measured",
-    "clarify references (but don’t add info)",
-    "avoid ambiguity (but keep meaning)",
-    "keep the same point of view",
-    "keep the same tense",
-    "keep the same ordering of key points",
-    "keep the same call-to-action",
-    "make it easier to read quickly",
-    "make it sound more natural",
-    "avoid uncommon words",
-    "avoid technical jargon",
-    "use a slightly more modern phrasing",
-    "use a slightly more traditional phrasing",
-    "use a slightly more journalistic phrasing",
-    "use a slightly more conversational phrasing",
-    "use a slightly more formal phrasing",
-    "use a slightly more concise phrasing",
-    "use a slightly more vivid phrasing (without adding details)",
-    "use stronger verbs (without changing meaning)",
-    "swap clause order to vary rhythm",
-    "tighten opener",
-    "tighten closer",
-    "reduce hedges if present (without changing certainty)",
-    "keep hedges if present",
-    "avoid intensifiers (very/really)",
-    "keep line breaks exactly",
-    "keep bullet markers exactly",
-    "keep the first and last sentence structure similar",
-    "keep short sentences short",
-    "break run-on sentences",
-    "combine choppy sentences",
-    "ensure it reads like a native speaker",
-    "avoid repetitive phrasing",
-    "use more concrete wording (without adding facts)",
-    "use more neutral wording (without losing intent)",
+    # Tone variations
+    "very formal and academic",
+    "casual and conversational",
+    "urgent and action-oriented",
+    "calm and measured",
+    "enthusiastic and energetic",
+    "matter-of-fact and neutral",
+    "authoritative and confident",
+    "empathetic and understanding",
+    "skeptical and questioning",
+    "optimistic and positive",
+    "cautious and careful",
+    "bold and assertive",
+    "diplomatic and balanced",
+    "passionate and intense",
+    "detached and objective",
+    "warm and inviting",
+    "sharp and incisive",
+    
+    # Voice and perspective
+    "active voice throughout",
+    "passive voice where natural",
+    "mix of active and passive",
+    "first person perspective",
+    "second person perspective",
+    "third person perspective",
+    "imperative mood",
+    "subjunctive mood where appropriate",
+    
+    # Structural variations
+    "start with the conclusion (if it doesn't change meaning)",
+    "build up to the main point",
+    "use parallel structure",
+    "vary sentence complexity",
+    "use fragments for emphasis (sparingly)",
+    "combine related ideas",
+    "separate distinct points",
+    "flow as continuous prose",
+    
+    # Word choice strategies
+    "prefer shorter, simpler words",
+    "use more sophisticated vocabulary",
+    "mix formal and informal language",
+    "use concrete, specific terms",
+    "use abstract, conceptual terms",
+    "prefer action verbs",
+    "use descriptive adjectives",
+    "avoid repetition of words",
+    "use synonyms extensively",
+    "prefer Anglo-Saxon words",
+    "prefer Latin-derived words",
+    "use idiomatic expressions",
+    "avoid idioms, use literal language",
+    
+    # Style personas
+    "sound like a news anchor",
+    "sound like a social media influencer",
+    "sound like a business executive",
+    "sound like a teacher explaining",
+    "sound like a friend giving advice",
+    "sound like a journalist reporting",
+    "sound like a blogger writing",
+    "sound like a scientist explaining",
+    "sound like a poet expressing",
+    "sound like a lawyer arguing",
+    "sound like a marketer selling",
+    "sound like a critic reviewing",
+    
+    # Punctuation and formatting
+    "use varied punctuation",
+    "prefer periods and commas",
+    "use semicolons and colons",
+    "use dashes and parentheses",
+    "minimal punctuation",
+    "expressive punctuation",
+    "keep original formatting (if it doesn't interfere with tags)",
+    "vary formatting while preserving tag positions",
+    
+    # Emphasis and rhythm
+    "emphasize the beginning",
+    "emphasize the end",
+    "create rhythm through repetition",
+    "avoid repetition entirely",
+    "use alliteration naturally",
+    "vary word length patterns",
+    "create contrast between ideas",
+    "build momentum toward conclusion",
+    
+    # Clarity and flow
+    "prioritize clarity above all",
+    "prioritize natural flow",
+    "use transitions liberally",
+    "minimal transitions, direct connections",
+    "explain concepts simply",
+    "assume reader knowledge",
+    "add context naturally (without adding new facts)",
+    "remove unnecessary context while keeping key facts",
+    
+    # Specific techniques
+    "use rhetorical questions (if original intent allows)",
+    "avoid questions, use statements",
+    "use metaphors and similes naturally",
+    "avoid figurative language",
+    "use examples and illustrations (without adding new facts)",
+    "stick to abstract concepts",
+    "quantify with numbers (can round/approximate)",
+    "qualify with descriptive language",
+    "use time references naturally",
+    "paraphrase time references differently",
+    "use location references naturally",
+    "paraphrase location references differently",
 ]
 
 
@@ -643,19 +606,33 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
     structure = random.choice([
         "significantly restructure (reorder sentences/paragraphs if logical)",
         "moderately restructure (reorder some clauses)",
-        "minimal restructure (keep mostly same order)"
+        "minimal restructure (keep mostly same order)",
+        "move the main point to the beginning (if it doesn't change meaning)",
+        "move the main point to the end (if it doesn't change meaning)",
+        "group related ideas together in new ways",
+        "reorganize ideas while maintaining logical flow",
+        "split long ideas into separate sentences",
+        "combine short ideas into longer sentences",
+        "restructure to emphasize different aspects"
     ])
     
     # Random length variation
     # Logic: If strict shortening needed (retry) OR original is close to limit, force shorter options.
     if force_short:
-        length = f"CRITICAL: MAKE IT SHORTER. Remove filler words. Condense sentences. STRICTLY UNDER {max_chars} CHARS."
+        length = random.choice([
+            f"CRITICAL: MAKE IT SHORTER. Remove filler words. Condense sentences. STRICTLY UNDER {max_chars} CHARS.",
+            f"URGENT: Cut it down significantly. Remove all unnecessary words. Must be under {max_chars} chars.",
+            f"EMERGENCY: Compress aggressively. Eliminate redundancy. Maximum {max_chars} characters."
+        ])
     elif len(masked_text) > (max_chars - 30):
         # Very close to limit: ONLY allow shortening
         length = random.choice([
             "make 20-30% shorter by removing filler",
             "compress into fewer sentences",
-            f"condense strictly to fit under {max_chars} chars"
+            f"condense strictly to fit under {max_chars} chars",
+            "cut unnecessary words and phrases",
+            "trim down to essential points only",
+            "reduce verbosity while keeping meaning"
         ])
     elif len(masked_text) > (max_chars - 60):
         # Moderately close: Allow shortening or keeping same length
@@ -663,15 +640,20 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             "make 20-30% shorter by removing filler",
             "compress into fewer sentences",
             f"condense strictly to fit under {max_chars} chars",
-            "keep similar length but vary sentence lengths"
+            "keep similar length but vary sentence lengths",
+            "slightly reduce length by tightening phrasing",
+            "trim excess while maintaining all key points"
         ])
     elif len(masked_text) < 120:
         # Very short: Prioritize expansion or keeping same length
         length = random.choice([
             f"make 20-40% longer by expanding key points naturally (BUT UNDER {max_chars} CHARS)",
-            "add relevant context or adjectives to make it more descriptive",
+            f"add relevant context or adjectives to make it more descriptive (STAY UNDER {max_chars} CHARS)",
             "keep similar length but vary sentence lengths",
-            "break into more sentences"
+            "break into more sentences",
+            f"elaborate on key concepts without adding new facts (UNDER {max_chars} CHARS)",
+            f"expand with natural connecting phrases (MAX {max_chars} CHARACTERS)",
+            f"add descriptive details to enhance clarity (MUST BE UNDER {max_chars} CHARS)"
         ])
     else:
         # Safe zone (120 - 220 chars): Full variety
@@ -680,7 +662,12 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             f"make 10-20% longer by expanding key points naturally (BUT UNDER {max_chars} CHARS)",
             "keep similar length but vary sentence lengths",
             "compress into fewer sentences",
-            "break into more sentences"
+            "break into more sentences",
+            "make it significantly more concise",
+            f"expand naturally with additional context (UNDER {max_chars} CHARS)",
+            "vary length dramatically from original (but stay under limit)",
+            "tighten phrasing while preserving all meaning",
+            f"add elaboration where it enhances understanding (MAX {max_chars} CHARACTERS)"
         ])
     
     # Random tone
@@ -690,7 +677,21 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
         "urgent and direct",
         "calm and measured",
         "enthusiastic and energetic",
-        "matter-of-fact neutral"
+        "matter-of-fact neutral",
+        "conversational and approachable",
+        "professional and polished",
+        "informal and relaxed",
+        "authoritative and confident",
+        "empathetic and understanding",
+        "skeptical and questioning",
+        "optimistic and positive",
+        "cautious and careful",
+        "bold and assertive",
+        "diplomatic and balanced",
+        "passionate and intense",
+        "detached and objective",
+        "warm and inviting",
+        "sharp and incisive"
     ])
     
     # Random sentence structure
@@ -699,7 +700,18 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
         "use longer, flowing sentences",
         "mix short and long sentences",
         "start sentences differently each time",
-        "vary punctuation patterns"
+        "vary punctuation patterns",
+        "use parallel sentence structures",
+        "vary sentence beginnings (start with different parts of speech)",
+        "use rhetorical questions strategically (only if original intent allows)",
+        "combine simple sentences into complex ones",
+        "break complex sentences into simpler ones",
+        "use fragments for emphasis (sparingly)",
+        "vary between active and passive voice",
+        "use inverted sentence order occasionally (if natural)",
+        "create rhythm through sentence length variation",
+        "use semicolons and colons for variety",
+        "vary the position of key information in sentences (maintain meaning)"
     ])
     
     # Random word strategy
@@ -709,7 +721,21 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
         "prefer more sophisticated vocabulary",
         "mix formal and informal words",
         "use more action verbs",
-        "use more descriptive adjectives (sparingly)"
+        "use more descriptive adjectives (sparingly)",
+        "replace nouns with verbs where possible",
+        "use concrete nouns instead of abstract ones",
+        "prefer specific words over generic ones",
+        "use idiomatic expressions naturally",
+        "vary word length (mix short and long words)",
+        "avoid repeating the same root words",
+        "use stronger, more precise verbs",
+        "replace adjectives with more specific nouns",
+        "use metaphors and similes naturally",
+        "prefer Anglo-Saxon words over Latin-derived",
+        "prefer Latin-derived words over Anglo-Saxon",
+        "use colloquialisms and everyday language",
+        "use technical or specialized terms when appropriate",
+        "vary between literal and figurative language"
     ])
     
     # Check if there are placeholders in the text
@@ -878,7 +904,7 @@ async def webhook(req: Request):
     # Apply random tag removal to ALL tag sequences (start, middle, end)
     # This applies 40% removal chance to each tag in sequences of 2+ tags
     user_text = apply_random_tag_removal(user_text, removal_chance=0.4)
-    
+
     # Split tags from content to prevent AI from messing them up
     start_tags, content_body, end_tags = extract_tag_blocks(user_text)
     
@@ -917,12 +943,12 @@ async def webhook(req: Request):
             
             if candidates:
                 all_candidates.extend(candidates)
-        
+            
         if not all_candidates:
-            raise RuntimeError("no_candidates")
+                    raise RuntimeError("no_candidates")
         
         print(f"DEBUG: Total candidates generated: {len(all_candidates)}")
-        
+
         # Filter candidates that preserved all placeholders
         good_candidates = [c for c in all_candidates if contains_all_placeholders(c, masked.placeholders)]
         candidates_to_evaluate = good_candidates if good_candidates else all_candidates

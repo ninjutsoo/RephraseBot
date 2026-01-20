@@ -64,11 +64,11 @@ def test_message(original_text: str, test_num: int):
         
         # Generate 2 candidates with different styles
         for candidate_num in range(2):
-            style = random.choice(STYLES)
+    style = random.choice(STYLES)
             print(f"\n  Candidate {candidate_num + 1} - Style: {style}")
-            
-            prompt = build_prompt(masked.masked, style=style, force_short=False, max_chars=available_chars)
-            candidates = gemini_generate_candidates(prompt)
+    
+        prompt = build_prompt(masked.masked, style=style, force_short=False, max_chars=available_chars)
+        candidates = gemini_generate_candidates(prompt)
             
             if candidates:
                 print(f"    Generated {len(candidates)} output(s)")
