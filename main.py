@@ -319,96 +319,64 @@ class MaskedText:
     placeholders: List[Tuple[str, str]]  # (placeholder, original)
 
 
-def remove_tags_randomly(tags_block: str, removal_chance: float = 0.4) -> str:
+def apply_random_tag_removal(text: str, removal_chance: float = 0.4) -> str:
     """
-    Randomly remove tags from a block with specified probability.
-    Only applies to sequences of multiple consecutive tags.
+    Apply random removal to ALL tag sequences in the text (start, middle, end).
+    Tags are identified as consecutive @ or # mentions separated only by whitespace.
+    
+    When multiple tags are found together, each has a removal_chance probability
+    of being removed. At least one tag per sequence is always kept.
     
     Args:
-        tags_block: String containing tags like "@user1 @user2 #tag1 #tag2"
+        text: Full text containing tags like "@user1 @user2 text @user3"
         removal_chance: Probability (0.0-1.0) of removing each tag in a sequence
     
     Returns:
-        Tags block with some tags randomly removed
+        Text with some tags randomly removed from sequences
     """
-    if not tags_block.strip():
-        return tags_block
+    if not text.strip():
+        return text
     
-    # Find all tags in the block
-    tag_pattern = re.compile(r'([@#][\w\d_]+)')
-    tags = tag_pattern.findall(tags_block)
+    # Pattern to find sequences of tags (2 or more consecutive tags)
+    # Matches: @tag1 @tag2 or #tag1 #tag2 #tag3, etc.
+    tag_sequence_pattern = re.compile(r'((?:[@#][\w\d_]+\s*){2,})')
     
-    # Only apply removal if there are multiple tags
-    if len(tags) <= 1:
-        return tags_block
+    def process_sequence(match):
+        sequence = match.group(0)
+        # Find all individual tags in this sequence
+        individual_tags = re.findall(r'[@#][\w\d_]+', sequence)
+        
+        if len(individual_tags) <= 1:
+            return sequence
+        
+        # Apply 40% removal chance to each tag
+        kept_tags = [tag for tag in individual_tags if random.random() > removal_chance]
+        
+        # Always keep at least one tag
+        if not kept_tags:
+            kept_tags = [random.choice(individual_tags)]
+        
+        # Reconstruct with spaces, preserve trailing space if original had it
+        result = " ".join(kept_tags)
+        if sequence.endswith(" "):
+            result += " "
+        
+        return result
     
-    # Randomly decide which tags to keep
-    kept_tags = [tag for tag in tags if random.random() > removal_chance]
-    
-    # If we removed all tags, keep at least one random tag
-    if not kept_tags:
-        kept_tags = [random.choice(tags)]
-    
-    # Reconstruct the block with kept tags, maintaining spacing
-    return " ".join(kept_tags) + (" " if tags_block.rstrip() != tags_block else "")
+    # Apply removal to all tag sequences
+    return tag_sequence_pattern.sub(process_sequence, text)
 
 
-def extract_tag_blocks(text: str, apply_random_removal: bool = True) -> Tuple[str, str, str]:
+def extract_tag_blocks(text: str) -> Tuple[str, str, str]:
     """
     Separates a message into (start_tags, content, end_tags).
     start_tags: continuous block of mentions/hashtags at the very beginning
     end_tags: continuous block of mentions/hashtags at the very end
     content: the middle part to be rephrased
     
-    If apply_random_removal is True, randomly removes 40% of tags in sequences
-    with multiple consecutive tags.
-    
     Example:
     "@User1 Hi there #tag" -> ("@User1 ", "Hi there", " #tag")
-    "@User1 @User2 @User3 Hi" -> ("@User1 @User3 ", "Hi", "") (with random removal)
     """
-    # Tokenize by splitting on whitespace, but keep delimiters to reconstruct
-    # Actually, simpler: Use regex to find prefix/suffix blocks
-    
-    # Pattern for a tag line/block:
-    # A block is a sequence of (@mention|#hashtag) separated by whitespace
-    
-    # We'll tokenize and peel off from start and end
-    tokens = text.split()
-    if not tokens:
-        return "", "", ""
-        
-    def is_tag(t):
-        return t.startswith("@") or t.startswith("#")
-        
-    # Find start block
-    start_idxs = []
-    for i, t in enumerate(tokens):
-        if is_tag(t):
-            start_idxs.append(i)
-        else:
-            break
-            
-    # Find end block
-    end_idxs = []
-    for i in range(len(tokens) - 1, -1, -1):
-        if i < len(start_idxs): # Don't overlap
-            break
-        if is_tag(tokens[i]):
-            end_idxs.append(i)
-        else:
-            break
-    end_idxs.reverse()
-    
-    # Reconstruct strings based on original text is tricky with simple split.
-    # Better strategy: Regex match for "leading tags" and "trailing tags"
-    
-    # Regex to match a tag plus following whitespace
-    # ^(\s*([@#][\w\d_]+)\s+)*
-    
-    # Let's try a safer index-based slice on the original string
-    # We need to identify the character boundaries of the content.
-    
     # 1. Leading tags
     # Match start of string, optional whitespace, then repeated (tag + whitespace)
     leading_pattern = re.compile(r"^\s*((?:[@#][\w\d_]+\s*)+)", re.DOTALL)
@@ -433,11 +401,6 @@ def extract_tag_blocks(text: str, apply_random_removal: bool = True) -> Tuple[st
         else:
             end_block = m_end.group(1)
             content = content[:m_end.start()]
-    
-    # Apply random tag removal if enabled
-    if apply_random_removal:
-        start_block = remove_tags_randomly(start_block, removal_chance=0.4)
-        end_block = remove_tags_randomly(end_block, removal_chance=0.4)
             
     return start_block, content, end_block
 
@@ -878,6 +841,10 @@ async def webhook(req: Request):
             )
             return {"ok": True}
 
+    # Apply random tag removal to ALL tag sequences (start, middle, end)
+    # This applies 40% removal chance to each tag in sequences of 2+ tags
+    user_text = apply_random_tag_removal(user_text, removal_chance=0.4)
+    
     # Split tags from content to prevent AI from messing them up
     start_tags, content_body, end_tags = extract_tag_blocks(user_text)
     
@@ -902,11 +869,11 @@ async def webhook(req: Request):
     try:
         rewritten_body = ""
         
-        # Generate 5 candidates and select the one with lowest similarity score
+        # Generate 2 candidates and select the one with lowest similarity score
         all_candidates = []
         
-        # Generate 5 candidates with varying styles for maximum diversity
-        for candidate_num in range(5):
+        # Generate 2 candidates with varying styles for maximum diversity
+        for candidate_num in range(2):
             # Use different style for each candidate to increase diversity
             style = random.choice(STYLES)
             current_prompt = build_prompt(masked.masked, style=style, force_short=False, max_chars=available_chars)
