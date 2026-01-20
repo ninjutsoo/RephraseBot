@@ -17,6 +17,7 @@ from main import (
     unmask,
     build_prompt,
     gemini_generate_candidates,
+    calculate_text_similarity,
     STYLES
 )
 
@@ -28,9 +29,9 @@ def test_message(original_text: str, test_num: int):
     print(f"{original_text}")
     print(f"\n{'-'*80}")
     
-    # Step 1: Extract tag blocks
-    start_tags, content_body, end_tags = extract_tag_blocks(original_text)
-    print(f"\nEXTRACTED TAGS:")
+    # Step 1: Extract tag blocks (with random removal applied)
+    start_tags, content_body, end_tags = extract_tag_blocks(original_text, apply_random_removal=True)
+    print(f"\nEXTRACTED TAGS (with random 40% removal on sequences):")
     print(f"  START: '{start_tags}'")
     print(f"  CONTENT: '{content_body}'")
     print(f"  END: '{end_tags}'")
@@ -52,29 +53,55 @@ def test_message(original_text: str, test_num: int):
     for ph, orig in masked.placeholders:
         print(f"  {ph} -> {orig}")
     
-    # Step 4: Build prompt and generate
-    style = random.choice(STYLES)
-    print(f"\nSTYLE: {style}")
+    # Step 4: Generate 5 candidates and select best by similarity
+    print(f"\nGENERATING 5 CANDIDATES...")
     
     try:
-        prompt = build_prompt(masked.masked, style=style, force_short=False, max_chars=available_chars)
-        print(f"\nCALLING GEMINI API...")
-        candidates = gemini_generate_candidates(prompt)
+        all_candidates = []
         
-        if not candidates:
+        # Generate 5 candidates with different styles
+        for candidate_num in range(5):
+            style = random.choice(STYLES)
+            print(f"\n  Candidate {candidate_num + 1} - Style: {style}")
+            
+            prompt = build_prompt(masked.masked, style=style, force_short=False, max_chars=available_chars)
+            candidates = gemini_generate_candidates(prompt)
+            
+            if candidates:
+                print(f"    Generated {len(candidates)} output(s)")
+                all_candidates.extend(candidates)
+        
+        if not all_candidates:
             print("  [ERROR: No candidates returned]")
             return
         
-        print(f"  Got {len(candidates)} candidate(s)")
+        print(f"\n  Total candidates: {len(all_candidates)}")
         
-        # Pick first candidate
-        chosen = candidates[0].strip()
-        print(f"\nAI OUTPUT (before unmask, {len(chosen)} chars):")
-        print(f"{chosen}")
+        # Unmask and evaluate all candidates
+        print(f"\nEVALUATING CANDIDATES:")
+        candidate_scores = []
         
-        # Step 5: Unmask
-        rewritten_body = unmask(chosen, masked.placeholders).strip()
-        print(f"\nUNMASKED BODY ({len(rewritten_body)} chars):")
+        for idx, candidate in enumerate(all_candidates, 1):
+            unmasked = unmask(candidate.strip(), masked.placeholders).strip()
+            
+            if len(unmasked) <= available_chars:
+                similarity = calculate_text_similarity(content_body, unmasked)
+                candidate_scores.append((unmasked, similarity, idx))
+                print(f"  [{idx}] Length: {len(unmasked)}, Similarity: {similarity:.3f}")
+            else:
+                print(f"  [{idx}] SKIPPED (too long: {len(unmasked)} chars)")
+        
+        if not candidate_scores:
+            print("  [ERROR: No valid candidates under length limit]")
+            return
+        
+        # Select best candidate by LOWEST similarity score (most different from original)
+        rewritten_body, best_similarity, best_idx = min(candidate_scores, key=lambda x: x[1])
+        
+        print(f"\nSELECTED BEST: Candidate #{best_idx} (LOWEST similarity - most different)")
+        print(f"  Similarity Score: {best_similarity:.3f} (lower = more different)")
+        print(f"  Length: {len(rewritten_body)} chars")
+        print(f"\nUNMASKED BODY:")
         print(f"{rewritten_body}")
         
         # Step 6: Reassemble
@@ -98,6 +125,10 @@ def test_message(original_text: str, test_num: int):
         # Validation
         print(f"\n{'='*80}")
         print("VALIDATION:")
+        
+        # Calculate final similarity
+        final_similarity = calculate_text_similarity(original_text, final_message)
+        print(f"  SIMILARITY SCORE: {final_similarity:.3f} (lower = better for spam evasion, 0.0 = completely different, 1.0 = identical)")
         
         # Check all tags are present
         all_tags = [orig for ph, orig in masked.placeholders]

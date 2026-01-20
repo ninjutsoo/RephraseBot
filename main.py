@@ -2,7 +2,9 @@ import os
 import random
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass
+from math import sqrt
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import httpx
@@ -16,6 +18,76 @@ try:
     from google.genai import types  # type: ignore
 except Exception:  # pragma: no cover
     types = None  # type: ignore
+
+
+def calculate_text_similarity(original: str, rephrased: str) -> float:
+    """
+    Calculate similarity score between original and rephrased text using multiple metrics
+    that mimic spam detection algorithms. Returns a score from 0.0 (completely different)
+    to 1.0 (identical).
+
+    Uses a combination of:
+    - Jaccard similarity (word set overlap)
+    - Cosine similarity (word frequency vectors)
+    - Normalized word overlap ratio
+    """
+
+    def preprocess_text(text: str) -> List[str]:
+        """Preprocess text for similarity calculation."""
+        # Convert to lowercase, remove punctuation, split into words
+        text = re.sub(r'[^\w\s]', ' ', text.lower())
+        words = [word.strip() for word in text.split() if word.strip() and len(word) > 1]
+        return words
+
+    original_words = preprocess_text(original)
+    rephrased_words = preprocess_text(rephrased)
+
+    if not original_words or not rephrased_words:
+        return 0.0
+
+    # 1. Jaccard similarity (intersection over union of word sets)
+    original_set = set(original_words)
+    rephrased_set = set(rephrased_words)
+    intersection = original_set & rephrased_set
+    union = original_set | rephrased_set
+    jaccard = len(intersection) / len(union) if union else 0.0
+
+    # 2. Cosine similarity using word frequency vectors
+    original_freq = Counter(original_words)
+    rephrased_freq = Counter(rephrased_words)
+
+    # Create combined vocabulary
+    all_words = set(original_freq.keys()) | set(rephrased_freq.keys())
+
+    # Create frequency vectors
+    original_vector = [original_freq.get(word, 0) for word in all_words]
+    rephrased_vector = [rephrased_freq.get(word, 0) for word in all_words]
+
+    # Calculate dot product and magnitudes
+    dot_product = sum(a * b for a, b in zip(original_vector, rephrased_vector))
+    original_magnitude = sqrt(sum(a * a for a in original_vector))
+    rephrased_magnitude = sqrt(sum(b * b for b in rephrased_vector))
+
+    cosine = dot_product / (original_magnitude * rephrased_magnitude) if original_magnitude * rephrased_magnitude > 0 else 0.0
+
+    # 3. Normalized word overlap ratio (considering frequency)
+    total_original_words = len(original_words)
+    total_rephrased_words = len(rephrased_words)
+    overlap_count = sum(min(original_freq[word], rephrased_freq[word]) for word in intersection)
+
+    # Normalize by average length to make it symmetric
+    avg_length = (total_original_words + total_rephrased_words) / 2
+    overlap_ratio = overlap_count / avg_length if avg_length > 0 else 0.0
+
+    # 4. Length ratio penalty (texts that are too different in length get lower scores)
+    length_ratio = min(len(original_words), len(rephrased_words)) / max(len(original_words), len(rephrased_words))
+    length_penalty = 0.8 + 0.2 * length_ratio  # Scale from 0.8 to 1.0
+
+    # Combine metrics with weights (tuned for spam detection similarity)
+    # Jaccard: 0.3, Cosine: 0.4, Overlap: 0.3, with length penalty
+    combined_score = (jaccard * 0.3 + cosine * 0.4 + overlap_ratio * 0.3) * length_penalty
+
+    return min(1.0, max(0.0, combined_score))
 
 
 app = FastAPI()
@@ -46,17 +118,23 @@ user_last_request: Dict[int, float] = {}
 
 SYSTEM_INSTRUCTION = os.environ.get(
     "SYSTEM_INSTRUCTION",
-    "You are an assistant that rephrases messages to avoid spam detection.\n\n"
+    "You are an assistant that aggressively rephrases messages to avoid spam detection while maintaining core intent.\n\n"
     "CRITICAL HARD LIMIT: The final output MUST be under 280 characters.\n"
-    "If the message is long, you MUST condense it, remove filler, and summarize to fit.\n"
+    "Length can vary significantly - make it much shorter, longer, or same length as needed.\n"
     "NEVER exceed 280 characters.\n\n"
-    "CORE GOAL: The rephrased message must convey the EXACT same meaning/intent but be "
-    "structurally and stylistically DIFFERENT from the original.\n\n"
-    "NUANCE PRESERVATION (CRITICAL):\n"
-    "- Preserve the underlying intent and meaning exactly.\n"
-    "- Ensure the subject-object relationship remains the same (who did what to whom).\n"
-    "- If a phrase is metaphorical, keep the metaphor's meaning, not just the words.\n"
-    "- You MAY change the tone/style/vocabulary as requested, provided the core meaning remains accurate.\n\n"
+    "CORE GOAL: The rephrased message must convey the SAME core meaning/intent but be "
+    "structurally and stylistically VERY DIFFERENT from the original.\n\n"
+    "AGGRESSIVE REPHRASING APPROACH:\n"
+    "- Be bold in restructuring - completely rewrite sentence order, combine/split ideas\n"
+    "- Use very different vocabulary and phrasing throughout\n"
+    "- Change the tone, style, and approach dramatically\n"
+    "- Make it sound like a completely different person wrote it\n"
+    "- Length can be 30-200% of original length (very flexible)\n\n"
+    "INTENT PRESERVATION (ESSENTIAL):\n"
+    "- Keep the fundamental message and purpose intact\n"
+    "- Maintain subject-object relationships (who did what to whom)\n"
+    "- Preserve call-to-action elements\n"
+    "- Don't add new information or change the core argument\n\n"
     "MENTION/TAG HANDLING (CRITICAL):\n"
     "- Do NOT change the role of @mentions. If a mention is used as a tag (e.g. at start/end), keep it as a tag.\n"
     "- IF a message starts with a block of @mentions, KEEP them at the start. Do not weave them into the sentence.\n"
@@ -65,33 +143,32 @@ SYSTEM_INSTRUCTION = os.environ.get(
     "- Keep mentions and hashtags in their approximate original positions (start vs end) if possible, or integrate naturally without changing meaning.\n\n"
     "MUST PRESERVE EXACTLY (these will be marked as __PROTECTED_N__):\n"
     "- All @mentions and #hashtags\n\n"
-    "SHOULD PRESERVE (naturally, not as placeholders):\n"
-    "- Names of people, organizations, locations\n"
-    "- Numbers and dates\n"
-    "- Key facts and specific details\n\n"
+    "SHOULD PRESERVE (can be paraphrased naturally):\n"
+    "- Names of people, organizations, locations (can use synonyms/descriptions)\n"
+    "- Numbers and dates (can be rounded, approximated, or expressed differently)\n"
+    "- Key facts and concepts (paraphrase freely, keep meaning)\n\n"
     "MUST PRESERVE:\n"
     "- Core message and meaning\n"
-    "- Key facts, claims, and specific details\n"
-    "- Call-to-action intent\n"
-    "- Context and references (e.g., 'people of Iran', '20,000 people')\n\n"
+    "- General claims and their direction\n"
+    "- Call-to-action intent\n\n"
     "HARD LIMIT:\n"
     "- The final output MUST be under 280 characters (Twitter/X limit).\n"
-    "- If the original is longer, condense it intelligently while keeping key info.\n\n"
-    "MUST VARY SIGNIFICANTLY:\n"
-    "- Sentence structure (reorder, combine, split sentences)\n"
-    "- Word choice (use synonyms, different phrasing)\n"
-    "- Paragraph structure (can reorder if logical)\n"
-    "- Sentence length and rhythm\n"
-    "- Transitional phrases\n"
-    "- Opening and closing\n\n"
-    "ALLOWED MODIFICATIONS:\n"
-    "- Remove filler words and redundancy\n"
-    "- Add natural connecting phrases\n"
-    "- Expand brief points with natural elaboration (without adding new facts)\n"
-    "- Compress verbose sections\n"
-    "- Change passive to active voice or vice versa\n"
-    "- Vary punctuation style\n"
-    "- Change from questions to statements or vice versa (if meaning preserved)\n\n"
+    "- Length can vary dramatically - be aggressive in making it shorter or longer as needed.\n\n"
+    "AGGRESSIVE VARIATION REQUIRED:\n"
+    "- Complete sentence restructuring (reorder, combine, split radically)\n"
+    "- Maximum vocabulary change (synonyms, different expressions)\n"
+    "- Dramatic style changes (formal↔casual, direct↔indirect, etc.)\n"
+    "- Different sentence length patterns\n"
+    "- New transitional phrases and connectors\n"
+    "- Completely different opening and closing approaches\n\n"
+    "ALLOWED MODIFICATIONS (be aggressive):\n"
+    "- Remove ALL filler words and redundancy aggressively\n"
+    "- Add or remove connecting phrases as needed\n"
+    "- Expand or compress sections dramatically\n"
+    "- Change voice, tense, and structure freely\n"
+    "- Vary punctuation dramatically\n"
+    "- Change between questions/statements/freestyle as needed\n"
+    "- Be much more concise or much more elaborate than original\n\n"
     "OUTPUT: Only the rewritten text, no preamble or explanation.",
 )
 
@@ -242,15 +319,53 @@ class MaskedText:
     placeholders: List[Tuple[str, str]]  # (placeholder, original)
 
 
-def extract_tag_blocks(text: str) -> Tuple[str, str, str]:
+def remove_tags_randomly(tags_block: str, removal_chance: float = 0.4) -> str:
+    """
+    Randomly remove tags from a block with specified probability.
+    Only applies to sequences of multiple consecutive tags.
+    
+    Args:
+        tags_block: String containing tags like "@user1 @user2 #tag1 #tag2"
+        removal_chance: Probability (0.0-1.0) of removing each tag in a sequence
+    
+    Returns:
+        Tags block with some tags randomly removed
+    """
+    if not tags_block.strip():
+        return tags_block
+    
+    # Find all tags in the block
+    tag_pattern = re.compile(r'([@#][\w\d_]+)')
+    tags = tag_pattern.findall(tags_block)
+    
+    # Only apply removal if there are multiple tags
+    if len(tags) <= 1:
+        return tags_block
+    
+    # Randomly decide which tags to keep
+    kept_tags = [tag for tag in tags if random.random() > removal_chance]
+    
+    # If we removed all tags, keep at least one random tag
+    if not kept_tags:
+        kept_tags = [random.choice(tags)]
+    
+    # Reconstruct the block with kept tags, maintaining spacing
+    return " ".join(kept_tags) + (" " if tags_block.rstrip() != tags_block else "")
+
+
+def extract_tag_blocks(text: str, apply_random_removal: bool = True) -> Tuple[str, str, str]:
     """
     Separates a message into (start_tags, content, end_tags).
     start_tags: continuous block of mentions/hashtags at the very beginning
     end_tags: continuous block of mentions/hashtags at the very end
     content: the middle part to be rephrased
     
+    If apply_random_removal is True, randomly removes 40% of tags in sequences
+    with multiple consecutive tags.
+    
     Example:
     "@User1 Hi there #tag" -> ("@User1 ", "Hi there", " #tag")
+    "@User1 @User2 @User3 Hi" -> ("@User1 @User3 ", "Hi", "") (with random removal)
     """
     # Tokenize by splitting on whitespace, but keep delimiters to reconstruct
     # Actually, simpler: Use regex to find prefix/suffix blocks
@@ -318,6 +433,11 @@ def extract_tag_blocks(text: str) -> Tuple[str, str, str]:
         else:
             end_block = m_end.group(1)
             content = content[:m_end.start()]
+    
+    # Apply random tag removal if enabled
+    if apply_random_removal:
+        start_block = remove_tags_randomly(start_block, removal_chance=0.4)
+        end_block = remove_tags_randomly(end_block, removal_chance=0.4)
             
     return start_block, content, end_block
 
@@ -782,45 +902,56 @@ async def webhook(req: Request):
     try:
         rewritten_body = ""
         
-        # Retry logic: Attempt 1 (Standard) -> Check -> Attempt 2 (Strict Shortening)
-        max_attempts = 2
+        # Generate 5 candidates and select the one with lowest similarity score
+        all_candidates = []
         
-        for attempt_idx in range(max_attempts):
-            # If this is a retry (attempt_idx > 0), force strict shortening
-            force_short = (attempt_idx > 0)
-            
-            # Pass available_chars to build_prompt
-            current_prompt = build_prompt(masked.masked, style=style, force_short=force_short, max_chars=available_chars)
-            
-            if force_short:
-                print(f"DEBUG: Output too long ({len(rewritten_body)} chars). Retrying with strict length constraint.")
-                current_prompt += (
-                    f"\n\nSYSTEM ALERT: Your previous output was {len(rewritten_body)} characters long."
-                    f"\nMAXIMUM ALLOWED IS {available_chars} CHARACTERS."
-                    "\nREWRITE IT NOW TO BE SIGNIFICANTLY SHORTER."
-                )
+        # Generate 5 candidates with varying styles for maximum diversity
+        for candidate_num in range(5):
+            # Use different style for each candidate to increase diversity
+            style = random.choice(STYLES)
+            current_prompt = build_prompt(masked.masked, style=style, force_short=False, max_chars=available_chars)
             
             candidates = gemini_generate_candidates(current_prompt)
-            print(f"DEBUG: Got {len(candidates)} candidates")
+            print(f"DEBUG: Candidate {candidate_num + 1}: Got {len(candidates)} outputs from Gemini")
             
-            if not candidates:
-                if attempt_idx == max_attempts - 1:
-                    raise RuntimeError("no_candidates")
-                continue
-
-            # Prefer candidates that preserved all placeholders so we don't corrupt tags/links.
-            good = [c for c in candidates if contains_all_placeholders(c, masked.placeholders)]
-            chosen = random.choice(good or candidates).strip()
-            
-            temp_rewritten_body = unmask(chosen, masked.placeholders).strip()
-            
-            if len(temp_rewritten_body) <= available_chars:
-                rewritten_body = temp_rewritten_body
-                print(f"DEBUG: Success on attempt {attempt_idx+1} ({len(rewritten_body)} chars)")
-                break
-            
-            # Keep the best effort so far
-            rewritten_body = temp_rewritten_body
+            if candidates:
+                all_candidates.extend(candidates)
+        
+        if not all_candidates:
+            raise RuntimeError("no_candidates")
+        
+        print(f"DEBUG: Total candidates generated: {len(all_candidates)}")
+        
+        # Filter candidates that preserved all placeholders
+        good_candidates = [c for c in all_candidates if contains_all_placeholders(c, masked.placeholders)]
+        candidates_to_evaluate = good_candidates if good_candidates else all_candidates
+        
+        # Unmask all candidates
+        unmasked_candidates = [(unmask(c.strip(), masked.placeholders).strip(), c) for c in candidates_to_evaluate]
+        
+        # Filter candidates that fit within available_chars
+        valid_candidates = [(unmasked, original) for unmasked, original in unmasked_candidates if len(unmasked) <= available_chars]
+        
+        if not valid_candidates:
+            # If no candidates fit, take the shortest one and try to work with it
+            print("DEBUG: No candidates fit within limit, taking shortest")
+            valid_candidates = [min(unmasked_candidates, key=lambda x: len(x[0]))]
+        
+        print(f"DEBUG: Valid candidates (under {available_chars} chars): {len(valid_candidates)}")
+        
+        # Calculate similarity scores for all valid candidates
+        candidate_scores = []
+        for unmasked, original in valid_candidates:
+            similarity = calculate_text_similarity(content_body, unmasked)
+            candidate_scores.append((unmasked, similarity))
+            print(f"DEBUG: Candidate similarity: {similarity:.3f}, length: {len(unmasked)}")
+        
+        # Select the candidate with the LOWEST similarity score (most different from original)
+        # This helps evade spam detection while maintaining intent
+        rewritten_body = min(candidate_scores, key=lambda x: x[1])[0]
+        best_similarity = min(candidate_scores, key=lambda x: x[1])[1]
+        
+        print(f"DEBUG: Selected best candidate with similarity {best_similarity:.3f} ({len(rewritten_body)} chars) - LOWEST score")
         
         # Reassemble final message with guaranteed spacing
         start_tags_clean = start_tags.rstrip()
