@@ -612,7 +612,7 @@ def extract_tweet_id(text: str) -> Optional[str]:
     return None
 
 
-async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None) -> None:
+async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, parse_mode: Optional[str] = None) -> None:
     """
     Send a message to a Telegram chat.
     
@@ -620,6 +620,7 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
         chat_id: The chat ID to send to
         text: The message text
         reply_markup: Optional inline keyboard markup
+        parse_mode: Optional parse mode for formatting (e.g., "MarkdownV2", "HTML")
     """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -628,6 +629,8 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
         "disable_web_page_preview": True,
         "allow_sending_without_reply": True,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
     
@@ -922,10 +925,11 @@ async def webhook(req: Request):
         # Channel restriction: Check if message is from allowed channel (if configured)
         if ALLOWED_FORWARD_CHANNEL:
             if not is_forwarded_from_allowed_channel(message):
+                channel_display = f"@{ALLOWED_FORWARD_CHANNEL}" if not ALLOWED_FORWARD_CHANNEL.startswith("-") else ALLOWED_FORWARD_CHANNEL
                 await telegram_send_message(
                     chat_id, 
-                    "⚠️ This bot is restricted to specific authorized sources.\n\n"
-                    "Please ensure the message is forwarded from the correct channel."
+                    f"⚠️ This bot is being used only on messages <b>forwarded</b> from <b>{channel_display}</b>.",
+                    parse_mode="HTML"
                 )
                 return {"ok": True}
     
