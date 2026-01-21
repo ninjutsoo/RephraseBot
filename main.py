@@ -612,6 +612,28 @@ def extract_tweet_id(text: str) -> Optional[str]:
     return None
 
 
+_ARABIC_SCRIPT_RE = re.compile(
+    r"["
+    r"\u0600-\u06FF"  # Arabic
+    r"\u0750-\u077F"  # Arabic Supplement
+    r"\u08A0-\u08FF"  # Arabic Extended-A
+    r"\uFB50-\uFDFF"  # Arabic Presentation Forms-A
+    r"\uFE70-\uFEFF"  # Arabic Presentation Forms-B
+    r"\U0001EE00-\U0001EEFF"  # Arabic Mathematical Alphabetic Symbols
+    r"]"
+)
+
+
+INVALID_TWEET_INPUT_MESSAGE = (
+    "Please send a valid English Tweet reply for me to rephrase."
+)
+
+
+def contains_arabic_script(text: str) -> bool:
+    """Return True if text contains Arabic-script letters (Arabic/Farsi, etc.)."""
+    return bool(_ARABIC_SCRIPT_RE.search(text or ""))
+
+
 async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, parse_mode: Optional[str] = None) -> None:
     """
     Send a message to a Telegram chat.
@@ -915,6 +937,17 @@ async def webhook(req: Request):
         pattern = r'https?://(?:twitter\.com|x\.com|mobile\.twitter\.com)/\S+\s*'
         user_text = re.sub(pattern, '', user_text, flags=re.IGNORECASE).strip()
         print(f"DEBUG: Detected X link (tweet_id={tweet_id}), removed URL from text for rephrasing")
+
+    # Input validation:
+    # - Must be an English reply (reject Arabic/Farsi script)
+    # - If a tweet link is provided, it must include reply text too (not link-only)
+    if tweet_id and not user_text.strip():
+        await telegram_send_message(chat_id, INVALID_TWEET_INPUT_MESSAGE)
+        return {"ok": True}
+
+    if contains_arabic_script(user_text):
+        await telegram_send_message(chat_id, INVALID_TWEET_INPUT_MESSAGE)
+        return {"ok": True}
 
     # Forward requirement: Only act on forwarded messages (exempt users bypass this)
     if not is_exempt_user:
