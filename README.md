@@ -36,7 +36,7 @@ This bot helps you share the same message multiple times with unique phrasing to
 - **Channel filtering**: Restrict processing to specific authorized sources
 - **Rate limiting**: Optional cooldown per user (disabled by default)
 - **Webhook authentication**: Secret token validation
-- **Analytics tracking**: Optional Supabase integration for usage insights
+- **No data storage**: Processes messages in-memory only
 
 ---
 
@@ -101,8 +101,6 @@ RephraseBot/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SUPABASE_URL` | None | Supabase Project URL (for analytics) |
-| `SUPABASE_KEY` | None | Supabase service_role key (for analytics) |
 | `TELEGRAM_WEBHOOK_SECRET_TOKEN` | None | Secret token for webhook verification |
 | `ALLOWED_FORWARD_CHANNEL` | None | Channel username or ID to restrict forwarding from |
 | `RATE_LIMIT_SECONDS` | `0` | Cooldown time between user requests (0 = disabled) |
@@ -160,24 +158,12 @@ Restrict the bot to only process messages from specific channels.
 
 ---
 
-## 📊 Analytics (Optional)
-
-Set `SUPABASE_URL` and `SUPABASE_KEY` to enable automatic tracking:
-- User activity timeline
-- Success/failure rates  
-- Rate limit violations
-- Performance metrics
-
-Logs are batched and written every 5 minutes to minimize API usage.
-
----
-
 ## 🧪 Testing
 
 ### Health Check
 ```bash
 curl https://your-service-url.com/
-# Response: {"ok": true, "supabase_connected": true}
+# Response: {"ok": true}
 ```
 
 ---

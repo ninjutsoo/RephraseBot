@@ -336,6 +336,93 @@ def flush_activity_logs() -> None:
         activity_buffer.clear()  # Clear to prevent memory buildup
 
 
+def is_pro_user(user_id: int) -> bool:
+    """Check if user has active Pro subscription or trial."""
+    if not supabase_client:
+        return False
+    
+    try:
+        result = supabase_client.table("users").select("is_pro, pro_expires_at, trial_ends_at").eq("user_id", user_id).execute()
+        
+        if not result.data:
+            return False
+        
+        user = result.data[0]
+        
+        # Check if pro (lifetime or not expired)
+        if user.get("is_pro"):
+            expires = user.get("pro_expires_at")
+            if not expires:  # Lifetime
+                return True
+            # Check if not expired
+            from datetime import datetime, timezone
+            if datetime.fromisoformat(expires.replace('Z', '+00:00')) > datetime.now(timezone.utc):
+                return True
+        
+        # Check if trial is active
+        trial_ends = user.get("trial_ends_at")
+        if trial_ends:
+            from datetime import datetime, timezone
+            if datetime.fromisoformat(trial_ends.replace('Z', '+00:00')) > datetime.now(timezone.utc):
+                return True
+        
+        return False
+    except Exception as e:
+        print(f"⚠ Failed to check pro status: {e}")
+        return False
+
+
+def get_user_preferences(user_id: int) -> Optional[dict]:
+    """Load user's saved preferences from database."""
+    if not supabase_client:
+        return None
+    
+    try:
+        result = supabase_client.table("users").select("preferred_tone, preferred_length, preferred_variation").eq("user_id", user_id).execute()
+        
+        if not result.data:
+            return None
+        
+        prefs = result.data[0]
+        return {
+            "tone": prefs.get("preferred_tone"),
+            "length": prefs.get("preferred_length"),
+            "variation": prefs.get("preferred_variation")
+        }
+    except Exception as e:
+        print(f"⚠ Failed to load preferences: {e}")
+        return None
+
+
+def save_user_preferences(user_id: int, tone: Optional[str] = None, 
+                         length: Optional[str] = None, variation: Optional[str] = None) -> bool:
+    """Save user's preferences to database."""
+    if not supabase_client:
+        return False
+    
+    try:
+        update_data = {}
+        if tone is not None:
+            update_data["preferred_tone"] = tone
+        if length is not None:
+            update_data["preferred_length"] = length
+        if variation is not None:
+            update_data["preferred_variation"] = variation
+        
+        if update_data:
+            supabase_client.table("users").update(update_data).eq("user_id", user_id).execute()
+            print(f"✓ Saved preferences for user {user_id}")
+            return True
+        return False
+    except Exception as e:
+        print(f"⚠ Failed to save preferences: {e}")
+        return False
+
+
+# In-memory storage for pending style selections (temporary during selection process)
+pending_selections: Dict[int, dict] = {}
+
+
 STYLES: List[str] = [
     # Tone variations
     "very formal and academic",
@@ -774,11 +861,144 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
         r.raise_for_status()
 
 
-def build_prompt(masked_text: str, style: str, force_short: bool = False, max_chars: int = 280) -> str:
-    # Multi-dimensional randomization for better spam evasion
+async def show_style_selector(chat_id: int, user_id: int, original_text: str) -> None:
+    """Show style selection menu to user."""
+    # Initialize pending selection with current preferences or defaults
+    prefs = get_user_preferences(user_id)
+    pending_selections[user_id] = {
+        "tone": prefs.get("tone") if prefs else "casual",
+        "length": prefs.get("length") if prefs else "medium",
+        "variation": prefs.get("variation") if prefs else "moderate",
+        "original_text": original_text,
+        "chat_id": chat_id
+    }
     
-    # Random structural changes
-    structure = random.choice([
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "📢 Urgent" if pending_selections[user_id]["tone"] == "urgent" else "Urgent", 
+                 "callback_data": "tone_urgent"},
+                {"text": "💬 Casual" if pending_selections[user_id]["tone"] == "casual" else "Casual", 
+                 "callback_data": "tone_casual"},
+                {"text": "👔 Formal" if pending_selections[user_id]["tone"] == "formal" else "Formal", 
+                 "callback_data": "tone_formal"}
+            ],
+            [
+                {"text": "📏 Short" if pending_selections[user_id]["length"] == "short" else "Short", 
+                 "callback_data": "length_short"},
+                {"text": "📝 Medium" if pending_selections[user_id]["length"] == "medium" else "Medium", 
+                 "callback_data": "length_medium"},
+                {"text": "📜 Long" if pending_selections[user_id]["length"] == "long" else "Long", 
+                 "callback_data": "length_long"}
+            ],
+            [
+                {"text": "🛡️ Conservative" if pending_selections[user_id]["variation"] == "conservative" else "Conservative", 
+                 "callback_data": "var_conservative"},
+                {"text": "🔄 Moderate" if pending_selections[user_id]["variation"] == "moderate" else "Moderate", 
+                 "callback_data": "var_moderate"},
+                {"text": "🚀 Aggressive" if pending_selections[user_id]["variation"] == "aggressive" else "Aggressive", 
+                 "callback_data": "var_aggressive"}
+            ],
+            [
+                {"text": "✅ Generate with these settings", "callback_data": "generate"}
+            ]
+        ]
+    }
+    
+    message = (
+        "🎨 <b>Choose Your Style</b>\n\n"
+        f"<b>Tone:</b> {pending_selections[user_id]['tone'].title()}\n"
+        f"<b>Length:</b> {pending_selections[user_id]['length'].title()}\n"
+        f"<b>Variation:</b> {pending_selections[user_id]['variation'].title()}\n\n"
+        "Tap buttons to change, then Generate."
+    )
+    
+    await telegram_send_message(chat_id, message, reply_markup=keyboard, parse_mode="HTML")
+
+
+async def update_style_selector(callback_query: dict) -> None:
+    """Update the style selector UI after button press."""
+    user_id = callback_query["from"]["id"]
+    message_id = callback_query["message"]["message_id"]
+    chat_id = callback_query["message"]["chat"]["id"]
+    
+    if user_id not in pending_selections:
+        await telegram_send_message(chat_id, "⚠️ Selection expired. Please forward the message again.")
+        return
+    
+    # Update keyboard with new selections
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "📢 Urgent" if pending_selections[user_id]["tone"] == "urgent" else "Urgent", 
+                 "callback_data": "tone_urgent"},
+                {"text": "💬 Casual" if pending_selections[user_id]["tone"] == "casual" else "Casual", 
+                 "callback_data": "tone_casual"},
+                {"text": "👔 Formal" if pending_selections[user_id]["tone"] == "formal" else "Formal", 
+                 "callback_data": "tone_formal"}
+            ],
+            [
+                {"text": "📏 Short" if pending_selections[user_id]["length"] == "short" else "Short", 
+                 "callback_data": "length_short"},
+                {"text": "📝 Medium" if pending_selections[user_id]["length"] == "medium" else "Medium", 
+                 "callback_data": "length_medium"},
+                {"text": "📜 Long" if pending_selections[user_id]["length"] == "long" else "Long", 
+                 "callback_data": "length_long"}
+            ],
+            [
+                {"text": "🛡️ Conservative" if pending_selections[user_id]["variation"] == "conservative" else "Conservative", 
+                 "callback_data": "var_conservative"},
+                {"text": "🔄 Moderate" if pending_selections[user_id]["variation"] == "moderate" else "Moderate", 
+                 "callback_data": "var_moderate"},
+                {"text": "🚀 Aggressive" if pending_selections[user_id]["variation"] == "aggressive" else "Aggressive", 
+                 "callback_data": "var_aggressive"}
+            ],
+            [
+                {"text": "✅ Generate with these settings", "callback_data": "generate"}
+            ]
+        ]
+    }
+    
+    message = (
+        "🎨 <b>Choose Your Style</b>\n\n"
+        f"<b>Tone:</b> {pending_selections[user_id]['tone'].title()}\n"
+        f"<b>Length:</b> {pending_selections[user_id]['length'].title()}\n"
+        f"<b>Variation:</b> {pending_selections[user_id]['variation'].title()}\n\n"
+        "Tap buttons to change, then Generate."
+    )
+    
+    # Edit the message
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": message,
+        "reply_markup": keyboard,
+        "parse_mode": "HTML"
+    }
+    
+    async with httpx.AsyncClient() as http:
+        await http.post(url, json=payload)
+
+
+def build_prompt(masked_text: str, style: str, force_short: bool = False, max_chars: int = 280,
+                 user_tone: Optional[str] = None, user_length: Optional[str] = None, 
+                 user_variation: Optional[str] = None) -> str:
+    # Multi-dimensional randomization for better spam evasion
+    # If user preferences provided, use those instead of random
+    
+    # Structural changes based on variation level
+    if user_variation == "conservative":
+        structure = "minimal restructure (keep mostly same order)"
+    elif user_variation == "aggressive":
+        structure = random.choice([
+            "significantly restructure (reorder sentences/paragraphs if logical)",
+            "move the main point to the beginning (if it doesn't change meaning)",
+            "move the main point to the end (if it doesn't change meaning)",
+            "reorganize ideas while maintaining logical flow"
+        ])
+    else:  # moderate or None (random)
+        structure = random.choice([
         "significantly restructure (reorder sentences/paragraphs if logical)",
         "moderately restructure (reorder some clauses)",
         "minimal restructure (keep mostly same order)",
@@ -791,9 +1011,25 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
         "restructure to emphasize different aspects"
     ])
     
-    # Random length variation
-    # Logic: If strict shortening needed (retry) OR original is close to limit, force shorter options.
-    if force_short:
+    # Length variation - use user preference if provided
+    if user_length == "short":
+        length = random.choice([
+            "make it concise and brief",
+            "compress into fewer sentences",
+            f"condense to under {int(max_chars * 0.6)} chars",
+            "remove all filler words",
+            "trim to essential points only"
+        ])
+    elif user_length == "long":
+        length = random.choice([
+            f"make it more detailed and descriptive (BUT UNDER {max_chars} CHARS)",
+            f"expand key points naturally (STAY UNDER {max_chars} CHARS)",
+            f"add relevant context (MAX {max_chars} CHARACTERS)",
+            f"elaborate on concepts (MUST BE UNDER {max_chars} CHARS)"
+        ])
+    elif user_length == "medium":
+        length = "keep similar length but vary sentence structure"
+    elif force_short:
         length = random.choice([
             f"CRITICAL: MAKE IT SHORTER. Remove filler words. Condense sentences. STRICTLY UNDER {max_chars} CHARS.",
             f"URGENT: Cut it down significantly. Remove all unnecessary words. Must be under {max_chars} chars.",
@@ -845,29 +1081,48 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             f"add elaboration where it enhances understanding (MAX {max_chars} CHARACTERS)"
         ])
     
-    # Random tone
-    tone = random.choice([
-        "very formal and academic",
-        "casual and friendly",
-        "urgent and direct",
-        "calm and measured",
-        "enthusiastic and energetic",
-        "matter-of-fact neutral",
-        "conversational and approachable",
-        "professional and polished",
-        "informal and relaxed",
-        "authoritative and confident",
-        "empathetic and understanding",
-        "skeptical and questioning",
-        "optimistic and positive",
-        "cautious and careful",
-        "bold and assertive",
-        "diplomatic and balanced",
-        "passionate and intense",
-        "detached and objective",
-        "warm and inviting",
-        "sharp and incisive"
-    ])
+    # Tone - use user preference if provided
+    if user_tone == "urgent":
+        tone = random.choice([
+            "urgent and direct",
+            "time-sensitive and action-oriented",
+            "immediate and pressing"
+        ])
+    elif user_tone == "casual":
+        tone = random.choice([
+            "casual and friendly",
+            "conversational and approachable",
+            "informal and relaxed"
+        ])
+    elif user_tone == "formal":
+        tone = random.choice([
+            "very formal and academic",
+            "professional and polished",
+            "diplomatic and balanced"
+        ])
+    else:  # Random
+        tone = random.choice([
+            "very formal and academic",
+            "casual and friendly",
+            "urgent and direct",
+            "calm and measured",
+            "enthusiastic and energetic",
+            "matter-of-fact neutral",
+            "conversational and approachable",
+            "professional and polished",
+            "informal and relaxed",
+            "authoritative and confident",
+            "empathetic and understanding",
+            "skeptical and questioning",
+            "optimistic and positive",
+            "cautious and careful",
+            "bold and assertive",
+            "diplomatic and balanced",
+            "passionate and intense",
+            "detached and objective",
+            "warm and inviting",
+            "sharp and incisive"
+        ])
     
     # Random sentence structure
     sentence_style = random.choice([
@@ -1072,7 +1327,64 @@ async def webhook(req: Request):
 
     update = await req.json()
 
-    message = update.get("message") or update.get("edited_message")
+    # Handle callback queries (button presses)
+    if "callback_query" in update:
+        callback = update["callback_query"]
+        user_id = callback["from"]["id"]
+        data = callback["data"]
+        
+        if user_id not in pending_selections:
+            # Selection expired
+            chat_id = callback["message"]["chat"]["id"]
+            await telegram_send_message(chat_id, "⚠️ Selection expired. Please forward the message again.")
+            return {"ok": True}
+        
+        # Handle button presses
+        if data.startswith("tone_"):
+            pending_selections[user_id]["tone"] = data.split("_")[1]
+            await update_style_selector(callback)
+        elif data.startswith("length_"):
+            pending_selections[user_id]["length"] = data.split("_")[1]
+            await update_style_selector(callback)
+        elif data.startswith("var_"):
+            pending_selections[user_id]["variation"] = data.split("_")[1]
+            await update_style_selector(callback)
+        elif data == "generate":
+            # User confirmed - save preferences and rephrase
+            selection = pending_selections[user_id]
+            save_user_preferences(user_id, 
+                                tone=selection["tone"],
+                                length=selection["length"],
+                                variation=selection["variation"])
+            
+            # Now rephrase with these settings
+            chat_id = selection["chat_id"]
+            user_text = selection["original_text"]
+            
+            # Delete the selection message
+            message_id = callback["message"]["message_id"]
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
+            async with httpx.AsyncClient() as http:
+                await http.post(url, json={"chat_id": chat_id, "message_id": message_id})
+            
+            # Continue to rephrasing logic below by creating a synthetic message
+            # We'll handle this by setting up the message dict
+            message = {
+                "from": callback["from"],
+                "chat": callback["message"]["chat"],
+                "text": user_text,
+                "forward_origin": {"type": "user"}  # Fake forward to bypass check
+            }
+            # Don't return, let it fall through to rephrasing logic
+        else:
+            return {"ok": True}
+        
+        # If not "generate", we're done
+        if data != "generate":
+            return {"ok": True}
+    else:
+        message = update.get("message") or update.get("edited_message")
+    
     if not message:
         return {"ok": True}
 
@@ -1180,6 +1492,19 @@ async def webhook(req: Request):
                 f"Rate limit: 1 message per {RATE_LIMIT_SECONDS} seconds."
             )
             return {"ok": True}
+    
+    # For exempt users (or Pro users), show style selector if not coming from callback
+    # Check if this is a fresh message (not from callback "generate" button)
+    if is_exempt_user and user_id not in pending_selections:
+        # Show style selector menu
+        await show_style_selector(chat_id, user_id, user_text)
+        return {"ok": True}
+    
+    # Load user preferences for rephrasing
+    user_prefs = get_user_preferences(user_id) if user_id else None
+    user_tone = user_prefs.get("tone") if user_prefs else None
+    user_length = user_prefs.get("length") if user_prefs else None
+    user_variation = user_prefs.get("variation") if user_prefs else None
 
     # Apply random tag removal to ALL tag sequences (start, middle, end)
     # This applies 40% removal chance to each tag in sequences of 2+ tags
@@ -1219,7 +1544,8 @@ async def webhook(req: Request):
         for candidate_num in range(2):
             # Use different style for each candidate to increase diversity
             style = random.choice(STYLES)
-            current_prompt = build_prompt(masked.masked, style=style, force_short=False, max_chars=available_chars)
+            current_prompt = build_prompt(masked.masked, style=style, force_short=False, max_chars=available_chars,
+                                        user_tone=user_tone, user_length=user_length, user_variation=user_variation)
             
             candidates = gemini_generate_candidates(current_prompt)
             print(f"DEBUG: Candidate {candidate_num + 1}: Got {len(candidates)} outputs from Gemini")
@@ -1389,6 +1715,9 @@ async def webhook(req: Request):
         # Update rate limit timestamp after successful processing
         if user_id:
             update_rate_limit(user_id)
+            # Clean up pending selections
+            if user_id in pending_selections:
+                del pending_selections[user_id]
 
     except Exception as exc:
         import traceback
