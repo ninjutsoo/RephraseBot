@@ -1451,6 +1451,13 @@ async def webhook(req: Request):
         await telegram_send_message(chat_id, INVALID_TWEET_INPUT_MESSAGE)
         return {"ok": True}
 
+    # For exempt users (or Pro users), show style selector BEFORE forward check
+    # This allows them to send messages directly without forwarding
+    if is_exempt_user and user_id not in pending_selections:
+        # Show style selector menu
+        await show_style_selector(chat_id, user_id, user_text)
+        return {"ok": True}
+    
     # Forward requirement: Only act on forwarded messages (exempt users bypass this)
     if not is_exempt_user:
         if not is_forwarded(message):
@@ -1492,13 +1499,6 @@ async def webhook(req: Request):
                 f"Rate limit: 1 message per {RATE_LIMIT_SECONDS} seconds."
             )
             return {"ok": True}
-    
-    # For exempt users (or Pro users), show style selector if not coming from callback
-    # Check if this is a fresh message (not from callback "generate" button)
-    if is_exempt_user and user_id not in pending_selections:
-        # Show style selector menu
-        await show_style_selector(chat_id, user_id, user_text)
-        return {"ok": True}
     
     # Load user preferences for rephrasing
     user_prefs = get_user_preferences(user_id) if user_id else None
