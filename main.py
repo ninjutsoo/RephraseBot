@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover
 
 
 def calculate_text_similarity(original: str, rephrased: str) -> float:
-    """
+    """st 
     Calculate similarity score between original and rephrased text using multiple metrics
     that mimic spam detection algorithms. Returns a score from 0.0 (completely different)
     to 1.0 (identical).
@@ -249,6 +249,91 @@ def log_to_supabase(table_name: str, data: dict) -> bool:
     except Exception as e:
         print(f"⚠ Failed to log to Supabase table '{table_name}': {e}")
         return False
+
+
+# In-memory buffer for batch writes to activity_logs
+activity_buffer: List[dict] = []
+BATCH_SIZE = 100  # Flush when buffer reaches this size
+
+
+def track_user(user_id: int, username: Optional[str], first_name: str, 
+               last_name: Optional[str], language_code: Optional[str]) -> None:
+    """
+    Track user - insert if new, update if username/name changed.
+    Only writes to DB if user is new or info changed.
+    """
+    if not supabase_client:
+        return
+    
+    try:
+        # Check if user exists
+        result = supabase_client.table("users").select("*").eq("user_id", user_id).execute()
+        
+        if not result.data:
+            # NEW USER - insert
+            supabase_client.table("users").insert({
+                "user_id": user_id,
+                "username": username,
+                "first_name": first_name,
+                "last_name": last_name,
+                "language_code": language_code,
+            }).execute()
+            print(f"✓ New user tracked: {user_id} (@{username or 'no_username'})")
+        else:
+            # EXISTING USER - check if info changed
+            existing = result.data[0]
+            if (existing.get("username") != username or 
+                existing.get("first_name") != first_name or
+                existing.get("last_name") != last_name):
+                supabase_client.table("users").update({
+                    "username": username,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                }).eq("user_id", user_id).execute()
+                print(f"✓ User info updated: {user_id}")
+    except Exception as e:
+        print(f"⚠ Failed to track user {user_id}: {e}")
+
+
+def log_activity(user_id: int, action_type: str, **kwargs) -> None:
+    """
+    Log activity to buffer (batched writes for efficiency).
+    
+    Args:
+        user_id: Telegram user ID
+        action_type: Type of action (e.g., 'rephrase_success', 'rate_limited')
+        **kwargs: Additional fields (original_length, error_message, etc.)
+    """
+    if not supabase_client:
+        return
+    
+    from datetime import datetime, timezone
+    
+    activity_buffer.append({
+        "user_id": user_id,
+        "action_type": action_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **kwargs
+    })
+    
+    # Flush if buffer is full
+    if len(activity_buffer) >= BATCH_SIZE:
+        flush_activity_logs()
+
+
+def flush_activity_logs() -> None:
+    """Flush activity buffer to Supabase (batch insert)."""
+    if not supabase_client or not activity_buffer:
+        return
+    
+    try:
+        supabase_client.table("activity_logs").insert(activity_buffer).execute()
+        count = len(activity_buffer)
+        activity_buffer.clear()
+        print(f"✓ Flushed {count} activity logs to Supabase")
+    except Exception as e:
+        print(f"⚠ Failed to flush activity logs: {e}")
+        activity_buffer.clear()  # Clear to prevent memory buildup
 
 
 STYLES: List[str] = [
@@ -919,22 +1004,61 @@ def gemini_generate_candidates(prompt: str) -> List[str]:
 
 @app.on_event("startup")
 async def startup_event():
-    """Test Supabase connection on startup"""
+    """Test Supabase connection on startup and start background tasks"""
     if supabase_client:
         try:
-            # Simple query to test connection - just fetch from any table
-            # This will fail gracefully if no tables exist yet
-            supabase_client.table("_supabase_connection_test").select("*").limit(1).execute()
-            print("✓ Supabase connection test passed")
+            # Test connection by querying the users table
+            result = supabase_client.table("users").select("user_id").limit(1).execute()
+            print(f"✓ Supabase connected - 'users' table accessible ({len(result.data)} rows)")
+            
+            # Test activity_logs table
+            result2 = supabase_client.table("activity_logs").select("id").limit(1).execute()
+            print(f"✓ Supabase connected - 'activity_logs' table accessible ({len(result2.data)} rows)")
+            
+            print("✓✓ Database tables verified and ready!")
+            
+            # Start background task to flush logs every 5 minutes
+            import asyncio
+            async def periodic_flush():
+                while True:
+                    await asyncio.sleep(300)  # 5 minutes
+                    flush_activity_logs()
+            
+            asyncio.create_task(periodic_flush())
+            print("✓ Background log flush task started (every 5 minutes)")
         except Exception as e:
-            # Expected to fail if table doesn't exist - that's fine
-            print(f"✓ Supabase client is connected (table test failed as expected: {type(e).__name__})")
+            print(f"⚠ Supabase connection error: {e}")
+            print("⚠ Make sure you've created the tables in Supabase (see setup instructions)")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Flush any remaining logs on shutdown"""
+    if supabase_client:
+        print("Flushing remaining activity logs...")
+        flush_activity_logs()
+        print("✓ Shutdown complete")
 
 
 @app.get("/")
 def health():
     """Health check endpoint"""
     status = {"ok": True, "supabase_connected": supabase_client is not None}
+    
+    # Test database tables if connected
+    if supabase_client:
+        try:
+            users_count = supabase_client.table("users").select("user_id", count="exact").limit(0).execute()
+            activity_count = supabase_client.table("activity_logs").select("id", count="exact").limit(0).execute()
+            status["database"] = {
+                "users_table": "ok",
+                "activity_logs_table": "ok",
+                "total_users": users_count.count,
+                "total_activity_logs": activity_count.count
+            }
+        except Exception as e:
+            status["database"] = {"error": str(e)}
+    
     return status
 
 
@@ -959,6 +1083,17 @@ async def webhook(req: Request):
     # Get user_id early to check for exemptions
     user_id = (message.get("from") or {}).get("id")
     is_exempt_user = user_id and user_id in EXEMPT_USER_IDS
+    
+    # Extract user info for tracking
+    user_from = message.get("from") or {}
+    username = user_from.get("username")
+    first_name = user_from.get("first_name", "Unknown")
+    last_name = user_from.get("last_name")
+    language_code = user_from.get("language_code")
+    
+    # Track user (only writes if new or info changed)
+    if user_id:
+        track_user(user_id, username, first_name, last_name, language_code)
 
     # Prefer text; fall back to caption (forwarded media captions).
     user_text = message.get("text") or message.get("caption") or ""
@@ -968,6 +1103,9 @@ async def webhook(req: Request):
 
     # Simple commands
     if user_text.strip().lower() in ("/start", "start"):
+        # Log /start command
+        if user_id:
+            log_activity(user_id=user_id, action_type="command_start")
         await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
         return {"ok": True}
     
@@ -990,6 +1128,14 @@ async def webhook(req: Request):
         return {"ok": True}
 
     if contains_arabic_script(user_text):
+        # Log Persian/Arabic character error
+        if user_id:
+            log_activity(
+                user_id=user_id,
+                action_type="persian_error",
+                error_type="persian_chars",
+                original_length=len(user_text)
+            )
         await telegram_send_message(chat_id, INVALID_TWEET_INPUT_MESSAGE)
         return {"ok": True}
 
@@ -1002,6 +1148,13 @@ async def webhook(req: Request):
         # Channel restriction: Check if message is from allowed channel (if configured)
         if ALLOWED_FORWARD_CHANNEL:
             if not is_forwarded_from_allowed_channel(message):
+                # Log invalid channel error
+                if user_id:
+                    log_activity(
+                        user_id=user_id,
+                        action_type="invalid_channel",
+                        error_type="wrong_channel"
+                    )
                 channel_display = f"@{ALLOWED_FORWARD_CHANNEL}" if not ALLOWED_FORWARD_CHANNEL.startswith("-") else ALLOWED_FORWARD_CHANNEL
                 await telegram_send_message(
                     chat_id, 
@@ -1014,6 +1167,13 @@ async def webhook(req: Request):
     if user_id:
         seconds_remaining = check_rate_limit(user_id)
         if seconds_remaining is not None:
+            # Log rate limit hit
+            log_activity(
+                user_id=user_id,
+                action_type="rate_limited",
+                error_type="rate_limit",
+                error_message=f"Wait {seconds_remaining} seconds"
+            )
             await telegram_send_message(
                 chat_id,
                 f"⏱️ Please wait {seconds_remaining} second{'s' if seconds_remaining != 1 else ''} before sending another message.\n\n"
@@ -1046,6 +1206,9 @@ async def webhook(req: Request):
     style = random.choice(STYLES)
     # Prompt is built inside the loop to allow modification on retry
 
+    # Track request start time for performance logging
+    request_start_time = time.time()
+    
     try:
         rewritten_body = ""
         
@@ -1207,6 +1370,22 @@ async def webhook(req: Request):
 
         await telegram_send_message(chat_id, final_message, reply_markup=reply_markup)
         
+        # Calculate response time
+        response_time_ms = int((time.time() - request_start_time) * 1000)
+        
+        # Log successful rephrase
+        if user_id:
+            log_activity(
+                user_id=user_id,
+                action_type="rephrase_success",
+                original_length=len(user_text),
+                rephrased_length=len(final_message),
+                similarity_score=best_similarity if 'best_similarity' in locals() else None,
+                response_time_ms=response_time_ms,
+                had_x_link=tweet_id is not None,
+                was_forwarded=is_forwarded(message)
+            )
+        
         # Update rate limit timestamp after successful processing
         if user_id:
             update_rate_limit(user_id)
@@ -1214,6 +1393,19 @@ async def webhook(req: Request):
     except Exception as exc:
         import traceback
         traceback.print_exc()  # Log to console
+        
+        # Log failed rephrase
+        if user_id:
+            response_time_ms = int((time.time() - request_start_time) * 1000)
+            log_activity(
+                user_id=user_id,
+                action_type="rephrase_failed",
+                error_type="api_error",
+                error_message=f"{type(exc).__name__}: {str(exc)[:200]}",
+                original_length=len(user_text) if user_text else None,
+                response_time_ms=response_time_ms
+            )
+        
         await telegram_send_message(chat_id, f"Error: {type(exc).__name__} - {str(exc)[:100]}")
 
     return {"ok": True}
