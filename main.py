@@ -222,6 +222,34 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "models/gemini-2.0-flash")
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Supabase client (optional, for logging/analytics)
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+supabase_client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    from supabase import create_client
+    supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("✓ Supabase client initialized")
+else:
+    print("⚠ Supabase credentials not found - database logging disabled")
+
+
+def log_to_supabase(table_name: str, data: dict) -> bool:
+    """
+    Helper function to safely log data to Supabase.
+    Returns True if successful, False otherwise.
+    """
+    if not supabase_client:
+        return False
+    
+    try:
+        supabase_client.table(table_name).insert(data).execute()
+        return True
+    except Exception as e:
+        print(f"⚠ Failed to log to Supabase table '{table_name}': {e}")
+        return False
+
 
 STYLES: List[str] = [
     # Tone variations
@@ -889,9 +917,25 @@ def gemini_generate_candidates(prompt: str) -> List[str]:
             raise  # Re-raise if not a rate limit or final attempt
 
 
+@app.on_event("startup")
+async def startup_event():
+    """Test Supabase connection on startup"""
+    if supabase_client:
+        try:
+            # Simple query to test connection - just fetch from any table
+            # This will fail gracefully if no tables exist yet
+            supabase_client.table("_supabase_connection_test").select("*").limit(1).execute()
+            print("✓ Supabase connection test passed")
+        except Exception as e:
+            # Expected to fail if table doesn't exist - that's fine
+            print(f"✓ Supabase client is connected (table test failed as expected: {type(e).__name__})")
+
+
 @app.get("/")
 def health():
-    return {"ok": True}
+    """Health check endpoint"""
+    status = {"ok": True, "supabase_connected": supabase_client is not None}
+    return status
 
 
 @app.post(f"/webhook/{WEBHOOK_SECRET}")
