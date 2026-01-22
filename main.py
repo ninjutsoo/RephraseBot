@@ -1396,6 +1396,8 @@ async def webhook(req: Request):
     user_id = (message.get("from") or {}).get("id")
     is_exempt_user = user_id and user_id in EXEMPT_USER_IDS
     
+    print(f"DEBUG: Received message from user_id={user_id}, is_exempt={is_exempt_user}, EXEMPT_USER_IDS={EXEMPT_USER_IDS}")
+    
     # Extract user info for tracking
     user_from = message.get("from") or {}
     username = user_from.get("username")
@@ -1409,7 +1411,10 @@ async def webhook(req: Request):
 
     # Prefer text; fall back to caption (forwarded media captions).
     user_text = message.get("text") or message.get("caption") or ""
+    print(f"DEBUG: user_text='{user_text}', length={len(user_text)}")
+    
     if not user_text.strip():
+        print(f"DEBUG: Empty text, sending error message")
         await telegram_send_message(chat_id, "Send a text message (or media caption) to rephrase it.")
         return {"ok": True}
 
@@ -1453,13 +1458,17 @@ async def webhook(req: Request):
 
     # For exempt users (or Pro users), show style selector BEFORE forward check
     # This allows them to send messages directly without forwarding
-    if is_exempt_user and user_id not in pending_selections:
+    is_pro = is_pro_user(user_id) if user_id else False
+    print(f"DEBUG: user_id={user_id}, is_exempt={is_exempt_user}, is_pro={is_pro}, in_pending={user_id in pending_selections}")
+    
+    if (is_exempt_user or is_pro) and user_id not in pending_selections:
+        print(f"DEBUG: Showing style selector for user {user_id}")
         # Show style selector menu
         await show_style_selector(chat_id, user_id, user_text)
         return {"ok": True}
     
-    # Forward requirement: Only act on forwarded messages (exempt users bypass this)
-    if not is_exempt_user:
+    # Forward requirement: Only act on forwarded messages (exempt users and Pro users bypass this)
+    if not is_exempt_user and not is_pro:
         if not is_forwarded(message):
             await telegram_send_message(chat_id, "Please forward a message to me, and I'll rephrase it.")
             return {"ok": True}
