@@ -865,10 +865,24 @@ async def show_style_selector(chat_id: int, user_id: int, original_text: str) ->
     """Show style selection menu to user."""
     # Initialize pending selection with current preferences or defaults
     prefs = get_user_preferences(user_id)
+    print(f"DEBUG: get_user_preferences returned: {prefs}")
+    
+    # Safely extract preferences with defaults
+    tone = "casual"
+    length = "medium"
+    variation = "moderate"
+    
+    if prefs:
+        tone = prefs.get("tone") or "casual"
+        length = prefs.get("length") or "medium"
+        variation = prefs.get("variation") or "moderate"
+    
+    print(f"DEBUG: Using tone={tone}, length={length}, variation={variation}")
+    
     pending_selections[user_id] = {
-        "tone": prefs.get("tone") if prefs else "casual",
-        "length": prefs.get("length") if prefs else "medium",
-        "variation": prefs.get("variation") if prefs else "moderate",
+        "tone": tone,
+        "length": length,
+        "variation": variation,
         "original_text": original_text,
         "chat_id": chat_id
     }
@@ -905,11 +919,15 @@ async def show_style_selector(chat_id: int, user_id: int, original_text: str) ->
         ]
     }
     
+    tone = pending_selections[user_id]['tone'] or "casual"
+    length = pending_selections[user_id]['length'] or "medium"
+    variation = pending_selections[user_id]['variation'] or "moderate"
+    
     message = (
         "🎨 <b>Choose Your Style</b>\n\n"
-        f"<b>Tone:</b> {pending_selections[user_id]['tone'].title()}\n"
-        f"<b>Length:</b> {pending_selections[user_id]['length'].title()}\n"
-        f"<b>Variation:</b> {pending_selections[user_id]['variation'].title()}\n\n"
+        f"<b>Tone:</b> {tone.title()}\n"
+        f"<b>Length:</b> {length.title()}\n"
+        f"<b>Variation:</b> {variation.title()}\n\n"
         "Tap buttons to change, then Generate."
     )
     
@@ -959,11 +977,15 @@ async def update_style_selector(callback_query: dict) -> None:
         ]
     }
     
+    tone = pending_selections[user_id]['tone'] or "casual"
+    length = pending_selections[user_id]['length'] or "medium"
+    variation = pending_selections[user_id]['variation'] or "moderate"
+    
     message = (
         "🎨 <b>Choose Your Style</b>\n\n"
-        f"<b>Tone:</b> {pending_selections[user_id]['tone'].title()}\n"
-        f"<b>Length:</b> {pending_selections[user_id]['length'].title()}\n"
-        f"<b>Variation:</b> {pending_selections[user_id]['variation'].title()}\n\n"
+        f"<b>Tone:</b> {tone.title()}\n"
+        f"<b>Length:</b> {length.title()}\n"
+        f"<b>Variation:</b> {variation.title()}\n\n"
         "Tap buttons to change, then Generate."
     )
     
@@ -1469,9 +1491,14 @@ async def webhook(req: Request):
     
     if (is_exempt_user or is_pro) and user_id not in pending_selections:
         print(f"DEBUG: Showing style selector for user {user_id}")
-        # Show style selector menu
-        await show_style_selector(chat_id, user_id, user_text)
-        return {"ok": True}
+        try:
+            # Show style selector menu
+            await show_style_selector(chat_id, user_id, user_text)
+        except Exception as e:
+            print(f"ERROR: Failed to show style selector: {e}")
+            # Fall through to normal rephrasing if style selector fails
+        else:
+            return {"ok": True}
     
     # Forward requirement: Only act on forwarded messages (exempt users and Pro users bypass this)
     if not is_exempt_user and not is_pro:
