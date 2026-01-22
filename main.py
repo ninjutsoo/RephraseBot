@@ -890,27 +890,27 @@ async def show_style_selector(chat_id: int, user_id: int, original_text: str) ->
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "📢 Urgent" if pending_selections[user_id]["tone"] == "urgent" else "Urgent", 
+                {"text": "• Urgent •" if pending_selections[user_id]["tone"] == "urgent" else "Urgent", 
                  "callback_data": "tone_urgent"},
-                {"text": "💬 Casual" if pending_selections[user_id]["tone"] == "casual" else "Casual", 
+                {"text": "• Casual •" if pending_selections[user_id]["tone"] == "casual" else "Casual", 
                  "callback_data": "tone_casual"},
-                {"text": "👔 Formal" if pending_selections[user_id]["tone"] == "formal" else "Formal", 
+                {"text": "• Formal •" if pending_selections[user_id]["tone"] == "formal" else "Formal", 
                  "callback_data": "tone_formal"}
             ],
             [
-                {"text": "📏 Short" if pending_selections[user_id]["length"] == "short" else "Short", 
+                {"text": "• Short •" if pending_selections[user_id]["length"] == "short" else "Short", 
                  "callback_data": "length_short"},
-                {"text": "📝 Medium" if pending_selections[user_id]["length"] == "medium" else "Medium", 
+                {"text": "• Medium •" if pending_selections[user_id]["length"] == "medium" else "Medium", 
                  "callback_data": "length_medium"},
-                {"text": "📜 Long" if pending_selections[user_id]["length"] == "long" else "Long", 
+                {"text": "• Long •" if pending_selections[user_id]["length"] == "long" else "Long", 
                  "callback_data": "length_long"}
             ],
             [
-                {"text": "🛡️ Conservative" if pending_selections[user_id]["variation"] == "conservative" else "Conservative", 
+                {"text": "• Conservative •" if pending_selections[user_id]["variation"] == "conservative" else "Conservative", 
                  "callback_data": "var_conservative"},
-                {"text": "🔄 Moderate" if pending_selections[user_id]["variation"] == "moderate" else "Moderate", 
+                {"text": "• Moderate •" if pending_selections[user_id]["variation"] == "moderate" else "Moderate", 
                  "callback_data": "var_moderate"},
-                {"text": "🚀 Aggressive" if pending_selections[user_id]["variation"] == "aggressive" else "Aggressive", 
+                {"text": "• Aggressive •" if pending_selections[user_id]["variation"] == "aggressive" else "Aggressive", 
                  "callback_data": "var_aggressive"}
             ],
             [
@@ -948,27 +948,27 @@ async def update_style_selector(callback_query: dict) -> None:
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "📢 Urgent" if pending_selections[user_id]["tone"] == "urgent" else "Urgent", 
+                {"text": "• Urgent •" if pending_selections[user_id]["tone"] == "urgent" else "Urgent", 
                  "callback_data": "tone_urgent"},
-                {"text": "💬 Casual" if pending_selections[user_id]["tone"] == "casual" else "Casual", 
+                {"text": "• Casual •" if pending_selections[user_id]["tone"] == "casual" else "Casual", 
                  "callback_data": "tone_casual"},
-                {"text": "👔 Formal" if pending_selections[user_id]["tone"] == "formal" else "Formal", 
+                {"text": "• Formal •" if pending_selections[user_id]["tone"] == "formal" else "Formal", 
                  "callback_data": "tone_formal"}
             ],
             [
-                {"text": "📏 Short" if pending_selections[user_id]["length"] == "short" else "Short", 
+                {"text": "• Short •" if pending_selections[user_id]["length"] == "short" else "Short", 
                  "callback_data": "length_short"},
-                {"text": "📝 Medium" if pending_selections[user_id]["length"] == "medium" else "Medium", 
+                {"text": "• Medium •" if pending_selections[user_id]["length"] == "medium" else "Medium", 
                  "callback_data": "length_medium"},
-                {"text": "📜 Long" if pending_selections[user_id]["length"] == "long" else "Long", 
+                {"text": "• Long •" if pending_selections[user_id]["length"] == "long" else "Long", 
                  "callback_data": "length_long"}
             ],
             [
-                {"text": "🛡️ Conservative" if pending_selections[user_id]["variation"] == "conservative" else "Conservative", 
+                {"text": "• Conservative •" if pending_selections[user_id]["variation"] == "conservative" else "Conservative", 
                  "callback_data": "var_conservative"},
-                {"text": "🔄 Moderate" if pending_selections[user_id]["variation"] == "moderate" else "Moderate", 
+                {"text": "• Moderate •" if pending_selections[user_id]["variation"] == "moderate" else "Moderate", 
                  "callback_data": "var_moderate"},
-                {"text": "🚀 Aggressive" if pending_selections[user_id]["variation"] == "aggressive" else "Aggressive", 
+                {"text": "• Aggressive •" if pending_selections[user_id]["variation"] == "aggressive" else "Aggressive", 
                  "callback_data": "var_aggressive"}
             ],
             [
@@ -1282,6 +1282,21 @@ def gemini_generate_candidates(prompt: str) -> List[str]:
 @app.on_event("startup")
 async def startup_event():
     """Test Supabase connection on startup and start background tasks"""
+    # Set bot commands (appears in Telegram UI)
+    commands_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands"
+    commands = {
+        "commands": [
+            {"command": "start", "description": "Start the bot"},
+            {"command": "settings", "description": "⚙️ Change style preferences (Pro)"}
+        ]
+    }
+    try:
+        async with httpx.AsyncClient() as http:
+            await http.post(commands_url, json=commands)
+        print("✓ Bot commands registered in Telegram")
+    except Exception as e:
+        print(f"⚠ Failed to register bot commands: {e}")
+    
     if supabase_client:
         try:
             # Test connection by querying the users table
@@ -1372,14 +1387,13 @@ async def webhook(req: Request):
             pending_selections[user_id]["variation"] = data.split("_")[1]
             await update_style_selector(callback)
         elif data == "generate":
-            # User confirmed - save preferences and rephrase
+            # User confirmed - save preferences
             selection = pending_selections[user_id]
             save_user_preferences(user_id, 
                                 tone=selection["tone"],
                                 length=selection["length"],
                                 variation=selection["variation"])
             
-            # Now rephrase with these settings
             chat_id = selection["chat_id"]
             user_text = selection["original_text"]
             
@@ -1389,13 +1403,21 @@ async def webhook(req: Request):
             async with httpx.AsyncClient() as http:
                 await http.post(url, json={"chat_id": chat_id, "message_id": message_id})
             
+            # Check if this was from /settings command (placeholder text)
+            if user_text == "📝 Send me the text you want to rephrase after choosing your style.":
+                # Just confirm and wait for user to send actual text
+                await telegram_send_message(chat_id, "✅ Preferences saved! Now send me the text you want to rephrase.")
+                # Clean up and return
+                del pending_selections[user_id]
+                return {"ok": True}
+            
             # Continue to rephrasing logic below by creating a synthetic message
-            # We'll handle this by setting up the message dict
             message = {
                 "from": callback["from"],
                 "chat": callback["message"]["chat"],
                 "text": user_text,
-                "forward_origin": {"type": "user"}  # Fake forward to bypass check
+                "forward_origin": {"type": "user"},  # Fake forward to bypass check
+                "_skip_style_selector": True  # Flag to skip showing selector again
             }
             # Don't return, let it fall through to rephrasing logic
         else:
@@ -1445,8 +1467,40 @@ async def webhook(req: Request):
         # Log /start command
         if user_id:
             log_activity(user_id=user_id, action_type="command_start")
-        await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
+        
+        is_pro = is_pro_user(user_id) if user_id else False
+        if is_exempt_user or is_pro:
+            # Show persistent keyboard with Settings button for Pro users
+            keyboard = {
+                "keyboard": [
+                    [{"text": "⚙️ Settings"}]
+                ],
+                "resize_keyboard": True,
+                "persistent": True
+            }
+            await telegram_send_message(chat_id, 
+                "🤖 <b>RephraseBot</b>\n\n"
+                "Send me any text and I'll rephrase it for you!\n\n"
+                "💎 <b>Pro Features:</b>\n"
+                "• Custom style preferences (tone, length, variation)\n"
+                "• Tap the <b>⚙️ Settings</b> button below to change preferences",
+                reply_markup=keyboard,
+                parse_mode="HTML")
+        else:
+            await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
         return {"ok": True}
+    
+    # /settings or /preferences command - show style selector for exempt/Pro users
+    if user_text.strip().lower() in ("/settings", "/preferences", "/style", "⚙️ settings"):
+        is_pro = is_pro_user(user_id) if user_id else False
+        if is_exempt_user or is_pro:
+            # Show a placeholder message to attach the selector to
+            placeholder_text = "📝 Send me the text you want to rephrase after choosing your style."
+            await show_style_selector(chat_id, user_id, placeholder_text)
+            return {"ok": True}
+        else:
+            await telegram_send_message(chat_id, "⚠️ Style preferences are only available for Pro users.")
+            return {"ok": True}
     
     # Check if message contains X/Twitter link (early detection)
     tweet_id = extract_tweet_id(user_text)
@@ -1478,8 +1532,10 @@ async def webhook(req: Request):
         await telegram_send_message(chat_id, INVALID_TWEET_INPUT_MESSAGE)
         return {"ok": True}
 
-    # For exempt users (or Pro users), show style selector BEFORE forward check
-    # This allows them to send messages directly without forwarding
+    # For exempt users (or Pro users), show style selector ONLY if they don't have saved preferences yet
+    # This allows first-time users to set preferences, then uses them automatically
+    # Users can change preferences anytime with /settings command
+    skip_selector = message.get("_skip_style_selector", False)
     is_pro = is_pro_user(user_id) if user_id else False
     
     # Clear stale pending selections (in case of previous errors)
@@ -1487,10 +1543,17 @@ async def webhook(req: Request):
         print(f"DEBUG: Clearing stale pending selection for user {user_id}")
         del pending_selections[user_id]
     
-    print(f"DEBUG: user_id={user_id}, is_exempt={is_exempt_user}, is_pro={is_pro}, in_pending={user_id in pending_selections}")
+    # Check if user has saved preferences
+    has_saved_prefs = False
+    if (is_exempt_user or is_pro) and user_id:
+        prefs = get_user_preferences(user_id)
+        has_saved_prefs = prefs is not None and any([prefs.get("tone"), prefs.get("length"), prefs.get("variation")])
     
-    if (is_exempt_user or is_pro) and user_id not in pending_selections:
-        print(f"DEBUG: Showing style selector for user {user_id}")
+    print(f"DEBUG: user_id={user_id}, is_exempt={is_exempt_user}, is_pro={is_pro}, has_saved_prefs={has_saved_prefs}, skip_selector={skip_selector}")
+    
+    # Show selector ONLY for first-time users (no saved preferences yet)
+    if (is_exempt_user or is_pro) and user_id not in pending_selections and not skip_selector and not has_saved_prefs:
+        print(f"DEBUG: First-time user - showing style selector for user {user_id}")
         try:
             # Show style selector menu
             await show_style_selector(chat_id, user_id, user_text)
