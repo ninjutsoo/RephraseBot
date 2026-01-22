@@ -1459,6 +1459,12 @@ async def webhook(req: Request):
     # For exempt users (or Pro users), show style selector BEFORE forward check
     # This allows them to send messages directly without forwarding
     is_pro = is_pro_user(user_id) if user_id else False
+    
+    # Clear stale pending selections (in case of previous errors)
+    if user_id in pending_selections:
+        print(f"DEBUG: Clearing stale pending selection for user {user_id}")
+        del pending_selections[user_id]
+    
     print(f"DEBUG: user_id={user_id}, is_exempt={is_exempt_user}, is_pro={is_pro}, in_pending={user_id in pending_selections}")
     
     if (is_exempt_user or is_pro) and user_id not in pending_selections:
