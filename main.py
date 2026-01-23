@@ -922,7 +922,7 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
                 print(f"   → This is NORMAL user behavior, not an error")
                 
                 # Log to database for analytics
-                if SUPABASE_CLIENT:
+                if supabase_client:
                     try:
                         log_activity(
                             user_id=chat_id,
@@ -943,7 +943,7 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
                 print(f"   → Payload: {payload}")
                 
                 # Log to database
-                if SUPABASE_CLIENT:
+                if supabase_client:
                     try:
                         log_activity(
                             user_id=chat_id,
@@ -969,7 +969,7 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
                 print(f"   → Error: {error_detail}")
                 
                 # Log to database
-                if SUPABASE_CLIENT:
+                if supabase_client:
                     try:
                         log_activity(
                             user_id=chat_id,
@@ -989,7 +989,7 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
             print(f"   → Error: {str(e)}")
             
             # Log to database
-            if SUPABASE_CLIENT:
+            if supabase_client:
                 try:
                     log_activity(
                         user_id=chat_id,
@@ -1010,7 +1010,7 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
             print(f"   → Error: {str(e)}")
             
             # Log to database
-            if SUPABASE_CLIENT:
+            if supabase_client:
                 try:
                     log_activity(
                         user_id=chat_id,
