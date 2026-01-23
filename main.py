@@ -908,8 +908,121 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
         payload["reply_markup"] = reply_markup
     
     async with httpx.AsyncClient(timeout=20) as http:
-        r = await http.post(url, json=payload)
-        r.raise_for_status()
+        try:
+            r = await http.post(url, json=payload)
+            r.raise_for_status()
+            print(f"✅ Message sent successfully to user {chat_id}")
+        except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            error_detail = e.response.text if e.response.text else "No details"
+            
+            if status_code == 403:
+                # User blocked the bot or bot can't access chat - NORMAL, don't crash
+                print(f"⚠️  403 FORBIDDEN: User {chat_id} blocked bot or chat inaccessible")
+                print(f"   → This is NORMAL user behavior, not an error")
+                
+                # Log to database for analytics
+                if SUPABASE_CLIENT:
+                    try:
+                        log_activity(
+                            user_id=chat_id,
+                            action_type="bot_blocked_by_user",
+                            error_type="telegram_403_forbidden",
+                            error_message=f"User blocked bot or chat inaccessible. Detail: {error_detail}"
+                        )
+                    except Exception as log_err:
+                        print(f"   → Failed to log 403 to database: {log_err}")
+                
+                # Don't raise - this is expected behavior
+                return
+            
+            elif status_code == 400:
+                # Bad request - likely malformed message
+                print(f"❌ 400 BAD REQUEST: Failed to send to {chat_id}")
+                print(f"   → Error: {error_detail}")
+                print(f"   → Payload: {payload}")
+                
+                # Log to database
+                if SUPABASE_CLIENT:
+                    try:
+                        log_activity(
+                            user_id=chat_id,
+                            action_type="telegram_api_error",
+                            error_type="telegram_400_bad_request",
+                            error_message=f"Bad request: {error_detail}"
+                        )
+                    except Exception as log_err:
+                        print(f"   → Failed to log 400 to database: {log_err}")
+                
+                # Don't crash bot for this user's error
+                return
+            
+            elif status_code == 429:
+                # Rate limited - already handled elsewhere but log it
+                print(f"⚠️  429 RATE LIMITED: Telegram rate limit hit for user {chat_id}")
+                print(f"   → Bot will retry automatically")
+                raise  # Let retry logic handle it
+            
+            else:
+                # Other errors (401, 500, etc.) - these ARE problems
+                print(f"❌ {status_code} ERROR: Failed to send to {chat_id}")
+                print(f"   → Error: {error_detail}")
+                
+                # Log to database
+                if SUPABASE_CLIENT:
+                    try:
+                        log_activity(
+                            user_id=chat_id,
+                            action_type="telegram_api_error",
+                            error_type=f"telegram_{status_code}_error",
+                            error_message=f"HTTP {status_code}: {error_detail}"
+                        )
+                    except Exception as log_err:
+                        print(f"   → Failed to log {status_code} to database: {log_err}")
+                
+                # Re-raise - these need attention
+                raise
+        
+        except httpx.TimeoutException as e:
+            # Network timeout
+            print(f"⏱️  TIMEOUT: Failed to reach Telegram API for user {chat_id}")
+            print(f"   → Error: {str(e)}")
+            
+            # Log to database
+            if SUPABASE_CLIENT:
+                try:
+                    log_activity(
+                        user_id=chat_id,
+                        action_type="telegram_api_error",
+                        error_type="telegram_timeout",
+                        error_message=f"Timeout: {str(e)}"
+                    )
+                except Exception as log_err:
+                    print(f"   → Failed to log timeout to database: {log_err}")
+            
+            # Don't crash - retry will happen naturally
+            return
+        
+        except Exception as e:
+            # Unexpected error
+            print(f"❌ UNEXPECTED ERROR: Failed to send to {chat_id}")
+            print(f"   → Error type: {type(e).__name__}")
+            print(f"   → Error: {str(e)}")
+            
+            # Log to database
+            if SUPABASE_CLIENT:
+                try:
+                    log_activity(
+                        user_id=chat_id,
+                        action_type="telegram_api_error",
+                        error_type="unexpected_error",
+                        error_message=f"{type(e).__name__}: {str(e)}"
+                    )
+                except Exception as log_err:
+                    print(f"   → Failed to log unexpected error to database: {log_err}")
+            
+            # Re-raise - we need to know about these
+            raise
 
 
 async def show_style_selector(chat_id: int, user_id: int, original_text: str) -> None:
