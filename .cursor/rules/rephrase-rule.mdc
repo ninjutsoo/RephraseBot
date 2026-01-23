@@ -5,7 +5,7 @@ description: This is a new rule
 
 # Overview
 
-No new .md added unless mentioned, 
-No test file needs to be saved unless specified or be used later
-If any edit solved a problem, previous failed solutions should be removed fully so we just don't stack unused code
+- Must not make any new .md file unless specifically mentioned by the user, 
+- No test file needs to be saved unless specified or be used later
+- If any edit solved a problem, previous failed solutions should be removed fully so we just don't stack unused code
 

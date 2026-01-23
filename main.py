@@ -553,10 +553,14 @@ class MaskedText:
     placeholders: List[Tuple[str, str]]  # (placeholder, original)
 
 
-def apply_random_tag_removal(text: str, removal_chance: float = 0.4) -> str:
+def apply_random_tag_removal(text: str, removal_chance: float = 0.4, has_link: bool = False) -> str:
     """
-    Apply random removal to ALL tag sequences in the text (start, middle, end).
+    Apply random removal to tag sequences in the text (start, middle, end).
     Tags are identified as consecutive @ or # mentions separated only by whitespace.
+    
+    Behavior depends on whether the message has a link:
+    - If has_link=True: Apply removal_chance to BOTH @ and # in groups of 2+
+    - If has_link=False: Apply removal_chance to # only, keep ALL @ mentions
     
     When multiple tags are found together, each has a removal_chance probability
     of being removed. At least one tag per sequence is always kept.
@@ -564,6 +568,7 @@ def apply_random_tag_removal(text: str, removal_chance: float = 0.4) -> str:
     Args:
         text: Full text containing tags like "@user1 @user2 text @user3"
         removal_chance: Probability (0.0-1.0) of removing each tag in a sequence
+        has_link: Whether the message contains a link (affects @ mention handling)
     
     Returns:
         Text with some tags randomly removed from sequences
@@ -583,12 +588,36 @@ def apply_random_tag_removal(text: str, removal_chance: float = 0.4) -> str:
         if len(individual_tags) <= 1:
             return sequence
         
-        # Apply 40% removal chance to each tag
-        kept_tags = [tag for tag in individual_tags if random.random() > removal_chance]
+        # Separate @ mentions and # hashtags
+        mentions = [tag for tag in individual_tags if tag.startswith('@')]
+        hashtags = [tag for tag in individual_tags if tag.startswith('#')]
         
-        # Always keep at least one tag
-        if not kept_tags:
-            kept_tags = [random.choice(individual_tags)]
+        kept_tags = []
+        
+        # Process hashtags (always apply removal chance if 2+ hashtags)
+        if len(hashtags) >= 2:
+            kept_hashtags = [tag for tag in hashtags if random.random() > removal_chance]
+            # Always keep at least one hashtag
+            if not kept_hashtags and hashtags:
+                kept_hashtags = [random.choice(hashtags)]
+            kept_tags.extend(kept_hashtags)
+        else:
+            kept_tags.extend(hashtags)
+        
+        # Process mentions based on has_link
+        if has_link:
+            # With link: apply removal chance to mentions in groups of 2+
+            if len(mentions) >= 2:
+                kept_mentions = [tag for tag in mentions if random.random() > removal_chance]
+                # Always keep at least one mention
+                if not kept_mentions and mentions:
+                    kept_mentions = [random.choice(mentions)]
+                kept_tags.extend(kept_mentions)
+            else:
+                kept_tags.extend(mentions)
+        else:
+            # Without link: keep ALL mentions
+            kept_tags.extend(mentions)
         
         # Reconstruct with spaces, preserve trailing space if original had it
         result = " ".join(kept_tags)
@@ -804,11 +833,20 @@ def extract_tweet_id(text: str) -> Optional[str]:
     - https://twitter.com/username/status/1234567890
     - https://x.com/username/status/1234567890
     - https://mobile.twitter.com/username/status/1234567890
+    
+    Returns None if more than one x.com link is found (invalid).
     """
     pattern = r'(?:twitter\.com|x\.com|mobile\.twitter\.com)/(?:\w+)/status/(\d+)'
-    match = re.search(pattern, text, re.IGNORECASE)
-    if match:
-        return match.group(1)
+    matches = re.findall(pattern, text, re.IGNORECASE)
+    
+    # If more than one link found, return None (invalid)
+    if len(matches) > 1:
+        return None
+    
+    # If exactly one link found, return the tweet ID
+    if len(matches) == 1:
+        return matches[0]
+    
     return None
 
 
@@ -832,6 +870,19 @@ INVALID_TWEET_INPUT_MESSAGE = (
 def contains_arabic_script(text: str) -> bool:
     """Return True if text contains Arabic-script letters (Arabic/Farsi, etc.)."""
     return bool(_ARABIC_SCRIPT_RE.search(text or ""))
+
+
+def has_forwarded_media(message: dict) -> bool:
+    """
+    Check if message contains forwarded media (photo, video, document, etc.).
+    Returns True if the message is forwarded AND contains media.
+    """
+    if not is_forwarded(message):
+        return False
+    
+    # Check for various media types
+    media_fields = ["photo", "video", "document", "animation", "voice", "video_note", "audio", "sticker"]
+    return any(field in message for field in media_fields)
 
 
 async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[dict] = None, parse_mode: Optional[str] = None) -> None:
@@ -1502,9 +1553,40 @@ async def webhook(req: Request):
             await telegram_send_message(chat_id, "⚠️ Style preferences are only available for Pro users.")
             return {"ok": True}
     
+    # Check for forwarded media (reject like Persian messages)
+    if has_forwarded_media(message):
+        # Log forwarded media error
+        if user_id:
+            log_activity(
+                user_id=user_id,
+                action_type="forwarded_media_error",
+                error_type="forwarded_media",
+                original_length=len(user_text)
+            )
+        await telegram_send_message(chat_id, INVALID_TWEET_INPUT_MESSAGE)
+        return {"ok": True}
+    
     # Check if message contains X/Twitter link (early detection)
     tweet_id = extract_tweet_id(user_text)
+    
+    # Check for multiple x.com links (extract_tweet_id returns None if more than one)
+    pattern = r'(?:twitter\.com|x\.com|mobile\.twitter\.com)/(?:\w+)/status/(\d+)'
+    link_count = len(re.findall(pattern, user_text, re.IGNORECASE))
+    
+    if link_count > 1:
+        # Reject messages with more than one x.com link
+        if user_id:
+            log_activity(
+                user_id=user_id,
+                action_type="multiple_links_error",
+                error_type="multiple_x_links",
+                original_length=len(user_text)
+            )
+        await telegram_send_message(chat_id, INVALID_TWEET_INPUT_MESSAGE)
+        return {"ok": True}
+    
     original_text_with_link = user_text  # Keep original for context
+    has_link = tweet_id is not None
     
     # If X link detected, remove it from the text before rephrasing
     if tweet_id:
@@ -1611,9 +1693,11 @@ async def webhook(req: Request):
     user_length = user_prefs.get("length") if user_prefs else None
     user_variation = user_prefs.get("variation") if user_prefs else None
 
-    # Apply random tag removal to ALL tag sequences (start, middle, end)
-    # This applies 40% removal chance to each tag in sequences of 2+ tags
-    user_text = apply_random_tag_removal(user_text, removal_chance=0.4)
+    # Apply random tag removal to tag sequences (start, middle, end)
+    # Behavior depends on whether message has a link:
+    # - With link: 40% removal for both # and @ in groups of 2+
+    # - Without link: 40% removal for # only, keep ALL @ mentions
+    user_text = apply_random_tag_removal(user_text, removal_chance=0.4, has_link=has_link)
 
     # Split tags from content to prevent AI from messing them up
     start_tags, content_body, end_tags = extract_tag_blocks(user_text)
