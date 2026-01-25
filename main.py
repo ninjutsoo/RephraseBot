@@ -613,7 +613,8 @@ def apply_random_tag_removal(text: str, removal_chance: float = 0.4, has_link: b
                 if not kept_mentions and mentions:
                     kept_mentions = [random.choice(mentions)]
                 kept_tags.extend(kept_mentions)
-        else:
+            else:
+                # Less than 2 mentions, keep all
                 kept_tags.extend(mentions)
         else:
             # Without link: keep ALL mentions
