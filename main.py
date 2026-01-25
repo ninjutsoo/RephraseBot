@@ -908,8 +908,8 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
     
     async with httpx.AsyncClient(timeout=20) as http:
         try:
-        r = await http.post(url, json=payload)
-        r.raise_for_status()
+            r = await http.post(url, json=payload)
+            r.raise_for_status()
             print(f"✅ Message sent successfully to user {chat_id}")
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
@@ -1183,7 +1183,7 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             "reorganize ideas while maintaining logical flow"
         ])
     else:  # moderate or None (random)
-    structure = random.choice([
+        structure = random.choice([
         "significantly restructure (reorder sentences/paragraphs if logical)",
         "moderately restructure (reorder some clauses)",
         "minimal restructure (keep mostly same order)",
@@ -1286,7 +1286,7 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             "diplomatic and balanced"
         ])
     else:  # Random
-    tone = random.choice([
+        tone = random.choice([
         "very formal and academic",
         "casual and friendly",
         "urgent and direct",
@@ -1590,7 +1590,7 @@ async def webhook(req: Request):
         if data != "generate":
             return {"ok": True}
     else:
-    message = update.get("message") or update.get("edited_message")
+        message = update.get("message") or update.get("edited_message")
     
     if not message:
         return {"ok": True}
@@ -1650,7 +1650,7 @@ async def webhook(req: Request):
                 reply_markup=keyboard,
                 parse_mode="HTML")
         else:
-        await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
+            await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
         return {"ok": True}
     
     # /settings or /preferences command - show style selector for exempt/Pro users
