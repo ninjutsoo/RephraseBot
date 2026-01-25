@@ -613,7 +613,7 @@ def apply_random_tag_removal(text: str, removal_chance: float = 0.4, has_link: b
                 if not kept_mentions and mentions:
                     kept_mentions = [random.choice(mentions)]
                 kept_tags.extend(kept_mentions)
-            else:
+        else:
                 kept_tags.extend(mentions)
         else:
             # Without link: keep ALL mentions
@@ -841,8 +841,8 @@ def extract_tweet_id(text: str) -> Optional[str]:
     
     # If more than one link found, return None (invalid)
     if len(matches) > 1:
-        return None
-    
+    return None
+
     # If exactly one link found, return the tweet ID
     if len(matches) == 1:
         return matches[0]
@@ -909,8 +909,8 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
     
     async with httpx.AsyncClient(timeout=20) as http:
         try:
-            r = await http.post(url, json=payload)
-            r.raise_for_status()
+        r = await http.post(url, json=payload)
+        r.raise_for_status()
             print(f"✅ Message sent successfully to user {chat_id}")
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
@@ -1184,7 +1184,7 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             "reorganize ideas while maintaining logical flow"
         ])
     else:  # moderate or None (random)
-        structure = random.choice([
+    structure = random.choice([
         "significantly restructure (reorder sentences/paragraphs if logical)",
         "moderately restructure (reorder some clauses)",
         "minimal restructure (keep mostly same order)",
@@ -1287,12 +1287,12 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             "diplomatic and balanced"
         ])
     else:  # Random
-        tone = random.choice([
-            "very formal and academic",
-            "casual and friendly",
-            "urgent and direct",
-            "calm and measured",
-            "enthusiastic and energetic",
+    tone = random.choice([
+        "very formal and academic",
+        "casual and friendly",
+        "urgent and direct",
+        "calm and measured",
+        "enthusiastic and energetic",
             "matter-of-fact neutral",
             "conversational and approachable",
             "professional and polished",
@@ -1308,7 +1308,7 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             "detached and objective",
             "warm and inviting",
             "sharp and incisive"
-        ])
+    ])
     
     # Random sentence structure
     sentence_style = random.choice([
@@ -1447,11 +1447,11 @@ def gemini_generate_candidates(prompt: str) -> List[str]:
 async def startup_event():
     """Test Supabase connection on startup and start background tasks"""
     # Set bot commands (appears in Telegram UI)
+    # Note: /settings is NOT in the command list - only shown as button for Pro users
     commands_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands"
     commands = {
         "commands": [
-            {"command": "start", "description": "Start the bot"},
-            {"command": "settings", "description": "⚙️ Change style preferences (Pro)"}
+            {"command": "start", "description": "Start the bot"}
         ]
     }
     try:
@@ -1591,7 +1591,7 @@ async def webhook(req: Request):
         if data != "generate":
             return {"ok": True}
     else:
-        message = update.get("message") or update.get("edited_message")
+    message = update.get("message") or update.get("edited_message")
     
     if not message:
         return {"ok": True}
@@ -1651,7 +1651,7 @@ async def webhook(req: Request):
                 reply_markup=keyboard,
                 parse_mode="HTML")
         else:
-            await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
+        await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
         return {"ok": True}
     
     # /settings or /preferences command - show style selector for exempt/Pro users
@@ -1663,7 +1663,8 @@ async def webhook(req: Request):
             await show_style_selector(chat_id, user_id, placeholder_text)
             return {"ok": True}
         else:
-            await telegram_send_message(chat_id, "⚠️ Style preferences are only available for Pro users.")
+            # Don't reveal that this feature exists - just say command not found
+            await telegram_send_message(chat_id, "Unknown command. Send me a message to rephrase it.")
             return {"ok": True}
     
     # Check for forwarded media (reject like Persian messages)
@@ -1835,7 +1836,7 @@ async def webhook(req: Request):
 
     # Track request start time for performance logging
     request_start_time = time.time()
-    
+
     try:
         rewritten_body = ""
         
