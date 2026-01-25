@@ -840,11 +840,9 @@ def extract_tweet_id(text: str) -> Optional[str]:
     pattern = r'(?:twitter\.com|x\.com|mobile\.twitter\.com)/(?:\w+)/status/(\d+)'
     matches = re.findall(pattern, text, re.IGNORECASE)
     
-    # If more than one link found, return None (invalid)
     if len(matches) > 1:
         return None
-
-    # If exactly one link found, return the tweet ID
+    
     if len(matches) == 1:
         return matches[0]
     
