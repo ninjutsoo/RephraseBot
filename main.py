@@ -194,7 +194,7 @@ SYSTEM_INSTRUCTION = os.environ.get(
     "CORE GOAL: The rephrased message must convey the SAME core meaning/intent but be "
     "structurally and stylistically VERY DIFFERENT from the original.\n\n"
     "INTENT PRESERVATION (ESSENTIAL):\n"
-    "- Keep the fundamental message and purpose intact\n"
+    "- Keep the fundamental message, purpose, and any opening greetings/salutations (e.g., 'Dear', 'Esteemed Members') intact\n"
     "- Maintain subject-object relationships (who did what to whom)\n"
     "- Preserve call-to-action elements\n"
     "- Don't add new information or change the core argument\n\n"
