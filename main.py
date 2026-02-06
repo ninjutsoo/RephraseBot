@@ -613,7 +613,7 @@ def apply_random_tag_removal(text: str, removal_chance: float = 0.4, has_link: b
                 if not kept_mentions and mentions:
                     kept_mentions = [random.choice(mentions)]
                 kept_tags.extend(kept_mentions)
-            else:
+        else:
                 # Less than 2 mentions, keep all
                 kept_tags.extend(mentions)
         else:
@@ -841,8 +841,8 @@ def extract_tweet_id(text: str) -> Optional[str]:
     matches = re.findall(pattern, text, re.IGNORECASE)
     
     if len(matches) > 1:
-        return None
-    
+    return None
+
     if len(matches) == 1:
         return matches[0]
     
@@ -908,8 +908,8 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
     
     async with httpx.AsyncClient(timeout=20) as http:
         try:
-            r = await http.post(url, json=payload)
-            r.raise_for_status()
+        r = await http.post(url, json=payload)
+        r.raise_for_status()
             print(f"✅ Message sent successfully to user {chat_id}")
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
@@ -1183,7 +1183,7 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             "reorganize ideas while maintaining logical flow"
         ])
     else:  # moderate or None (random)
-        structure = random.choice([
+    structure = random.choice([
         "significantly restructure (reorder sentences/paragraphs if logical)",
         "moderately restructure (reorder some clauses)",
         "minimal restructure (keep mostly same order)",
@@ -1286,7 +1286,7 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             "diplomatic and balanced"
         ])
     else:  # Random
-        tone = random.choice([
+    tone = random.choice([
         "very formal and academic",
         "casual and friendly",
         "urgent and direct",
@@ -1551,6 +1551,13 @@ async def webhook(req: Request):
             await update_style_selector(callback)
         elif data == "generate":
             # User confirmed - save preferences
+            # Safety check: Only allow pro users to save preferences (exempt users are NOT pro)
+            is_pro = is_pro_user(user_id) if user_id else False
+            if not is_pro:
+                chat_id = callback["message"]["chat"]["id"]
+                await telegram_send_message(chat_id, "⚠️ This feature is only available for Pro users.")
+                return {"ok": True}
+            
             selection = pending_selections[user_id]
             save_user_preferences(user_id, 
                                 tone=selection["tone"],
@@ -1590,7 +1597,7 @@ async def webhook(req: Request):
         if data != "generate":
             return {"ok": True}
     else:
-        message = update.get("message") or update.get("edited_message")
+    message = update.get("message") or update.get("edited_message")
     
     if not message:
         return {"ok": True}
@@ -1632,7 +1639,7 @@ async def webhook(req: Request):
             log_activity(user_id=user_id, action_type="command_start")
         
         is_pro = is_pro_user(user_id) if user_id else False
-        if is_exempt_user or is_pro:
+        if is_pro:
             # Show persistent keyboard with Settings button for Pro users
             keyboard = {
                 "keyboard": [
@@ -1656,7 +1663,7 @@ async def webhook(req: Request):
     # /settings or /preferences command - show style selector for exempt/Pro users
     if user_text.strip().lower() in ("/settings", "/preferences", "/style", "⚙️ settings"):
         is_pro = is_pro_user(user_id) if user_id else False
-        if is_exempt_user or is_pro:
+        if is_pro:
             # Show a placeholder message to attach the selector to
             placeholder_text = "📝 Send me the text you want to rephrase after choosing your style."
             await show_style_selector(chat_id, user_id, placeholder_text)
@@ -1727,8 +1734,8 @@ async def webhook(req: Request):
         await telegram_send_message(chat_id, INVALID_TWEET_INPUT_MESSAGE)
         return {"ok": True}
 
-    # For exempt users (or Pro users), show style selector ONLY if they don't have saved preferences yet
-    # This allows first-time users to set preferences, then uses them automatically
+    # For Pro users only, show style selector ONLY if they don't have saved preferences yet
+    # This allows first-time Pro users to set preferences, then uses them automatically
     # Users can change preferences anytime with /settings command
     skip_selector = message.get("_skip_style_selector", False)
     is_pro = is_pro_user(user_id) if user_id else False
@@ -1738,16 +1745,16 @@ async def webhook(req: Request):
         print(f"DEBUG: Clearing stale pending selection for user {user_id}")
         del pending_selections[user_id]
     
-    # Check if user has saved preferences
+    # Check if user has saved preferences (Pro users only)
     has_saved_prefs = False
-    if (is_exempt_user or is_pro) and user_id:
+    if is_pro and user_id:
         prefs = get_user_preferences(user_id)
         has_saved_prefs = prefs is not None and any([prefs.get("tone"), prefs.get("length"), prefs.get("variation")])
     
     print(f"DEBUG: user_id={user_id}, is_exempt={is_exempt_user}, is_pro={is_pro}, has_saved_prefs={has_saved_prefs}, skip_selector={skip_selector}")
     
-    # Show selector ONLY for first-time users (no saved preferences yet)
-    if (is_exempt_user or is_pro) and user_id not in pending_selections and not skip_selector and not has_saved_prefs:
+    # Show selector ONLY for first-time Pro users (no saved preferences yet)
+    if is_pro and user_id not in pending_selections and not skip_selector and not has_saved_prefs:
         print(f"DEBUG: First-time user - showing style selector for user {user_id}")
         try:
             # Show style selector menu
@@ -1800,11 +1807,20 @@ async def webhook(req: Request):
             )
             return {"ok": True}
     
-    # Load user preferences for rephrasing
-    user_prefs = get_user_preferences(user_id) if user_id else None
-    user_tone = user_prefs.get("tone") if user_prefs else None
-    user_length = user_prefs.get("length") if user_prefs else None
-    user_variation = user_prefs.get("variation") if user_prefs else None
+    # Load user preferences for rephrasing - ONLY for pro users
+    # Non-pro users (including exempt users) should not use saved preferences even if they exist in database
+    # Exempt users only bypass rate limiting, they are NOT pro users
+    user_tone = None
+    user_length = None
+    user_variation = None
+    if user_id:
+        is_pro = is_pro_user(user_id)
+        if is_pro:
+            user_prefs = get_user_preferences(user_id)
+            if user_prefs:
+                user_tone = user_prefs.get("tone")
+                user_length = user_prefs.get("length")
+                user_variation = user_prefs.get("variation")
 
     # Apply random tag removal to tag sequences (start, middle, end)
     # Behavior depends on whether message has a link:
