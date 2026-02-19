@@ -439,20 +439,50 @@ def get_weekly_activity_report() -> List[Tuple[str, int, int]]:
         start_utc = start_est.astimezone(timezone.utc).isoformat()
         end_utc = end_est.astimezone(timezone.utc).isoformat()
 
-        result = (
-            supabase_client.table("activity_logs")
-            .select("user_id, timestamp")
-            .gte("timestamp", start_utc)
-            .lte("timestamp", end_utc)
-            .execute()
-        )
-        if not result.data:
+        # Fetch all rows (Supabase default limit is 1000; paginate to get full week)
+        all_data: List[dict] = []
+        page_size = 1000
+        offset = 0
+        while True:
+            result = (
+                supabase_client.table("activity_logs")
+                .select("user_id, timestamp")
+                .gte("timestamp", start_utc)
+                .lte("timestamp", end_utc)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            chunk = result.data or []
+            all_data.extend(chunk)
+            if len(chunk) < page_size:
+                break
+            offset += page_size
+
+        if not all_data:
             return _empty_week_rows(start_est)
 
-        # (user_id, date_est) for each activity
+        # Users who had activity before this week (pre-fill "seen" so "new" = first appearance in window)
+        seen_user_ids: set = set()
+        offset_pre = 0
+        while True:
+            result_pre = (
+                supabase_client.table("activity_logs")
+                .select("user_id")
+                .lt("timestamp", start_utc)
+                .range(offset_pre, offset_pre + page_size - 1)
+                .execute()
+            )
+            chunk_pre = result_pre.data or []
+            for row in chunk_pre:
+                if row.get("user_id") is not None:
+                    seen_user_ids.add(int(row["user_id"]))
+            if len(chunk_pre) < page_size:
+                break
+            offset_pre += page_size
+
+        # (user_id, date_est) for each activity in the week
         active_by_day: Dict[str, set] = defaultdict(set)
-        first_seen: Dict[int, str] = {}
-        for row in result.data:
+        for row in all_data:
             uid = int(row["user_id"])
             ts = row["timestamp"]
             if not ts:
@@ -460,16 +490,15 @@ def get_weekly_activity_report() -> List[Tuple[str, int, int]]:
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(EST)
             day_str = dt.strftime("%Y-%m-%d")
             active_by_day[day_str].add(uid)
-            if uid not in first_seen or day_str < first_seen[uid]:
-                first_seen[uid] = day_str
 
-        # Build ordered list of 7 days
+        # New on day D = first appearance in window (same as notebook N-day: day_user_ids - seen_user_ids)
         out: List[Tuple[str, int, int]] = []
         for i in range(7):
             d = start_est + timedelta(days=i)
             day_str = d.strftime("%Y-%m-%d")
             active = active_by_day.get(day_str, set())
-            new = sum(1 for u in active if first_seen.get(u) == day_str)
+            new = len(active - seen_user_ids)
+            seen_user_ids |= active
             out.append((day_str, new, len(active)))
         return out
     except Exception as e:
