@@ -3,10 +3,12 @@ import os
 import random
 import re
 import time
-from collections import Counter, deque
+from collections import Counter, deque, defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from math import sqrt
 from typing import Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, Request
@@ -417,6 +419,67 @@ def save_user_preferences(user_id: int, tone: Optional[str] = None,
     except Exception as e:
         print(f"⚠ Failed to save preferences: {e}")
         return False
+
+
+EST = ZoneInfo("America/New_York")
+
+
+def get_weekly_activity_report() -> List[Tuple[str, int, int]]:
+    """
+    Fetch activity_logs for the past 7 days (EST), compute per-day new and active user counts.
+    New = first activity within that week is on that day. Active = distinct users with activity that day.
+    Returns list of (date_str, new_count, active_count) ordered by date (oldest first).
+    """
+    if not supabase_client:
+        return []
+    try:
+        now_est = datetime.now(EST)
+        end_est = now_est.replace(hour=23, minute=59, second=59, microsecond=999999)
+        start_est = (now_est - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        start_utc = start_est.astimezone(timezone.utc).isoformat()
+        end_utc = end_est.astimezone(timezone.utc).isoformat()
+
+        result = (
+            supabase_client.table("activity_logs")
+            .select("user_id, timestamp")
+            .gte("timestamp", start_utc)
+            .lte("timestamp", end_utc)
+            .execute()
+        )
+        if not result.data:
+            return _empty_week_rows(start_est)
+
+        # (user_id, date_est) for each activity
+        active_by_day: Dict[str, set] = defaultdict(set)
+        first_seen: Dict[int, str] = {}
+        for row in result.data:
+            uid = int(row["user_id"])
+            ts = row["timestamp"]
+            if not ts:
+                continue
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(EST)
+            day_str = dt.strftime("%Y-%m-%d")
+            active_by_day[day_str].add(uid)
+            if uid not in first_seen or day_str < first_seen[uid]:
+                first_seen[uid] = day_str
+
+        # Build ordered list of 7 days
+        out: List[Tuple[str, int, int]] = []
+        for i in range(7):
+            d = start_est + timedelta(days=i)
+            day_str = d.strftime("%Y-%m-%d")
+            active = active_by_day.get(day_str, set())
+            new = sum(1 for u in active if first_seen.get(u) == day_str)
+            out.append((day_str, new, len(active)))
+        return out
+    except Exception as e:
+        print(f"⚠ Failed to get weekly activity report: {e}")
+        return []
+
+
+def _empty_week_rows(start_est: datetime) -> List[Tuple[str, int, int]]:
+    """Return 7 rows of (date, 0, 0) for the past week."""
+    return [((start_est + timedelta(days=i)).strftime("%Y-%m-%d"), 0, 0) for i in range(7)]
 
 
 # In-memory storage for pending style selections (temporary during selection process)
@@ -1656,6 +1719,19 @@ async def webhook(req: Request):
                 "• Tap the <b>⚙️ Settings</b> button below to change preferences",
                 reply_markup=keyboard,
                 parse_mode="HTML")
+        elif is_exempt_user:
+            # Exception users: show Weekly report button
+            keyboard = {
+                "keyboard": [[{"text": "📊 Weekly report"}]],
+                "resize_keyboard": True,
+                "persistent": True,
+            }
+            await telegram_send_message(
+                chat_id,
+                "🤖 <b>RephraseBot</b>\n\nSend me any text and I'll rephrase it.\n\n📊 Tap <b>Weekly report</b> below for last 7 days (new / active users).",
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
         else:
             await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
         return {"ok": True}
@@ -1672,7 +1748,29 @@ async def webhook(req: Request):
             # Don't reveal that this feature exists - just say command not found
             await telegram_send_message(chat_id, "Unknown command. Send me a message to rephrase it.")
             return {"ok": True}
-    
+
+    # /report or "📊 Weekly report" – only for exempt (exception) users
+    if user_text.strip().lower() in ("/report", "report") or user_text.strip() == "📊 Weekly report":
+        if not is_exempt_user:
+            await telegram_send_message(chat_id, "Unknown command. Send me a message to rephrase it.")
+            return {"ok": True}
+        rows = get_weekly_activity_report()
+        if not rows:
+            await telegram_send_message(chat_id, "📊 No activity data available for the past week.")
+            return {"ok": True}
+        # Format: title + table (Date | New | Active), minimal and visual
+        start_d = rows[0][0]
+        end_d = rows[-1][0]
+        table_lines = ["Date       New  Active", "─" * 18] + [
+            "{}   {:>3}   {:>6}".format(d, new, active) for d, new, active in rows
+        ]
+        msg = (
+            "📊 <b>Weekly activity</b> ({} – {})\n\n"
+            "<code>{}</code>"
+        ).format(start_d, end_d, "\n".join(table_lines))
+        await telegram_send_message(chat_id, msg, parse_mode="HTML")
+        return {"ok": True}
+
     # Check for forwarded media (reject like Persian messages)
     if has_forwarded_media(message):
         # Log forwarded media error
