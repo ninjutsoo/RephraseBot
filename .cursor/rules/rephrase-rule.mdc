@@ -1,11 +1,24 @@
 ---
 name: rephrase-rule
-description: This is a new rule
+description: Project rules; update automatically when behaviour could be prevented by a new or revised rule.
 ---
 
-# Overview
+# Meta-rule (apply every chat)
 
-- Must not make any new .md file unless specifically mentioned by the user, 
-- No test file needs to be saved unless specified or be used later
-- If any edit solved a problem, previous failed solutions should be removed fully so we just don't stack unused code
+When you make a mistake or the user gives feedback that reveals a better rule: add, modify, group, or remove rules so the same mistake is less likely. Prefer one clear rule over several vague ones. Keep the list minimal and effective. **State rules in general terms; avoid naming specific files** unless necessary.
 
+---
+
+# Files and edits
+
+- **No new .md** unless the user explicitly asks for it.
+- **No persistent test files** unless the user says to save or reuse them.
+- **Example/config files**: Production/real config only; no test-only or temporary vars; remove them when the test is done.
+- **Clean up after fixes**: If an edit fixes a bug, remove any obsolete or failed attempts; don’t leave dead code.
+
+---
+
+# Testing and cleanup
+
+- **Run tests yourself**; don’t ask the user to run commands.
+- **After a test**: Remove test-only files and test-only changes; leave the codebase clean.
