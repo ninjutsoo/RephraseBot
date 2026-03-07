@@ -192,9 +192,6 @@ RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "30"))
 RATE_LIMIT_EXEMPT_USERS = os.environ.get("RATE_LIMIT_EXEMPT_USERS", "")
 EXEMPT_USER_IDS = set(int(uid.strip()) for uid in RATE_LIMIT_EXEMPT_USERS.split(",") if uid.strip())
 
-# Broadcast message (set MESSAGE in env). Exempt users can trigger via "reminder".
-MESSAGE = os.environ.get("MESSAGE") or os.environ.get("Message") or ""
-
 # In-memory storage for rate limiting (user_id -> last_request_timestamp)
 user_last_request: Dict[int, float] = {}
 
@@ -520,53 +517,6 @@ def _empty_week_rows(start_est: datetime) -> List[Tuple[str, int, int]]:
     return [((start_est + timedelta(days=i)).strftime("%Y-%m-%d"), 0, 0) for i in range(7)]
 
 
-def get_all_user_ids() -> set:
-    """Return set of user_id from Supabase users table (for broadcast)."""
-    if not supabase_client:
-        return set()
-    user_ids = set()
-    page_size = 1000
-    offset = 0
-    while True:
-        result = (
-            supabase_client.table("users")
-            .select("user_id")
-            .range(offset, offset + page_size - 1)
-            .execute()
-        )
-        chunk = result.data or []
-        for row in chunk:
-            uid = row.get("user_id")
-            if uid is not None:
-                user_ids.add(int(uid))
-        if len(chunk) < page_size:
-            break
-        offset += page_size
-    return user_ids
-
-
-def get_reminder_sent_today() -> bool:
-    """True if a reminder broadcast was already sent today (EST)."""
-    if not supabase_client:
-        return False
-    try:
-        now_est = datetime.now(EST)
-        start_est = now_est.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_est = now_est.replace(hour=23, minute=59, second=59, microsecond=999999)
-        start_utc = start_est.astimezone(timezone.utc).isoformat()
-        end_utc = end_est.astimezone(timezone.utc).isoformat()
-        result = (
-            supabase_client.table("activity_logs")
-            .select("id")
-            .eq("action_type", "reminder_broadcast")
-            .gte("timestamp", start_utc)
-            .lte("timestamp", end_utc)
-            .limit(1)
-            .execute()
-        )
-        return bool(result.data and len(result.data) > 0)
-    except Exception:
-        return False
 pending_selections: Dict[int, dict] = {}
 
 
@@ -1804,19 +1754,17 @@ async def webhook(req: Request):
                 reply_markup=keyboard,
                 parse_mode="HTML")
         elif is_exempt_user:
-            # Exception users: show Weekly report and Reminder buttons (Reminder shows "sent today" if already used)
-            reminder_label = "🔔 Reminder (sent today)" if get_reminder_sent_today() else "🔔 Reminder"
+            # Exception users: show Weekly report button only
             keyboard = {
                 "keyboard": [
                     [{"text": "📊 Weekly report"}],
-                    [{"text": reminder_label}],
                 ],
                 "resize_keyboard": True,
                 "is_persistent": True,
             }
             await telegram_send_message(
                 chat_id,
-                "🤖 <b>RephraseBot</b>\n\nSend me any text and I'll rephrase it.\n\n📊 <b>Weekly report</b> – last 7 days (new / active users).\n🔔 <b>Reminder</b> – send MESSAGE to all users (once per day).",
+                "🤖 <b>RephraseBot</b>\n\nSend me any text and I'll rephrase it.\n\n📊 <b>Weekly report</b> – last 7 days (new / active users).",
                 reply_markup=keyboard,
                 parse_mode="HTML",
             )
@@ -1857,56 +1805,6 @@ async def webhook(req: Request):
             "<code>{}</code>"
         ).format(start_d, end_d, "\n".join(table_lines))
         await telegram_send_message(chat_id, msg, parse_mode="HTML")
-        return {"ok": True}
-
-    # /reminder or "🔔 Reminder" – only for exempt users; once per day; sends MESSAGE to all users
-    reminder_trigger = (
-        user_text.strip().lower() in ("/reminder", "reminder")
-        or user_text.strip() in ("🔔 Reminder", "🔔 Reminder (sent today)")
-    )
-    if reminder_trigger:
-        if not is_exempt_user:
-            await telegram_send_message(chat_id, "Unknown command. Send me a message to rephrase it.")
-            return {"ok": True}
-        if get_reminder_sent_today():
-            keyboard = {
-                "keyboard": [
-                    [{"text": "📊 Weekly report"}],
-                    [{"text": "🔔 Reminder (sent today)"}],
-                ],
-                "resize_keyboard": True,
-                "is_persistent": True,
-            }
-            await telegram_send_message(chat_id, "⏸ Reminder already sent for today.", reply_markup=keyboard)
-            return {"ok": True}
-        test_exempt_only = os.environ.get("TEST_REMINDER_EXEMPT_ONLY", "").lower() in ("1", "true", "yes")
-        msg_text = (MESSAGE or "").strip() or ("Test reminder" if test_exempt_only else "")
-        if not msg_text:
-            await telegram_send_message(chat_id, "⚠ MESSAGE not set in env. Cannot send reminder.")
-            return {"ok": True}
-        targets = sorted(EXEMPT_USER_IDS) if test_exempt_only else sorted(get_all_user_ids())
-        if not targets:
-            await telegram_send_message(chat_id, "No users in database.")
-            return {"ok": True}
-        await telegram_send_message(chat_id, f"Sending to {len(targets)} user(s)..." + (" (test: exempt only)" if test_exempt_only else ""))
-        ok = 0
-        for uid in targets:
-            try:
-                await telegram_send_message(uid, msg_text)
-                ok += 1
-            except Exception:
-                pass
-        log_activity(user_id=user_id, action_type="reminder_broadcast")
-        flush_activity_logs()
-        keyboard = {
-            "keyboard": [
-                [{"text": "📊 Weekly report"}],
-                [{"text": "🔔 Reminder (sent today)"}],
-            ],
-            "resize_keyboard": True,
-            "is_persistent": True,
-        }
-        await telegram_send_message(chat_id, f"✅ Sent to {ok}/{len(targets)} users. Reminder done for today.", reply_markup=keyboard)
         return {"ok": True}
 
     # Check for forwarded media (reject like Persian messages)
