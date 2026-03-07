@@ -3,8 +3,9 @@ Verify that the weekly activity report matches what the bot sends when an exempt
 taps "📊 Weekly report" or sends /report.
 
 Uses the exact same logic as main.get_weekly_activity_report():
-- Past 7 days (EST), paginated fetches (Supabase 1000-row limit)
-- Pre-fill seen_user_ids with users who had activity before the week
+- Past 7 days (EST), only action_type='rephrase_success' counts as active/new
+- Paginated fetches (Supabase 1000-row limit)
+- Pre-fill seen_user_ids with users who had rephrase_success before the week
 - New on day D = len(active_on_D - seen_user_ids), then seen_user_ids |= active_on_D
 - Output format matches the bot message exactly
 
@@ -41,7 +42,8 @@ PAGE_SIZE = 1000
 
 def get_weekly_activity_report(supabase_client) -> List[Tuple[str, int, int]]:
     """
-    Same logic as main.get_weekly_activity_report(). Returns list of (date_str, new_count, active_count).
+    Same logic as main.get_weekly_activity_report(). Active/new = rephrase_success only.
+    Returns list of (date_str, new_count, active_count).
     """
     now_est = datetime.now(EST)
     end_est = now_est.replace(hour=23, minute=59, second=59, microsecond=999999)
@@ -55,6 +57,7 @@ def get_weekly_activity_report(supabase_client) -> List[Tuple[str, int, int]]:
         result = (
             supabase_client.table("activity_logs")
             .select("user_id, timestamp")
+            .eq("action_type", "rephrase_success")
             .gte("timestamp", start_utc)
             .lte("timestamp", end_utc)
             .range(offset, offset + PAGE_SIZE - 1)
@@ -75,6 +78,7 @@ def get_weekly_activity_report(supabase_client) -> List[Tuple[str, int, int]]:
         result_pre = (
             supabase_client.table("activity_logs")
             .select("user_id")
+            .eq("action_type", "rephrase_success")
             .lt("timestamp", start_utc)
             .range(offset_pre, offset_pre + PAGE_SIZE - 1)
             .execute()

@@ -433,7 +433,8 @@ EST = ZoneInfo("America/New_York")
 def get_weekly_activity_report() -> List[Tuple[str, int, int]]:
     """
     Fetch activity_logs for the past 7 days (EST), compute per-day new and active user counts.
-    New = first activity within that week is on that day. Active = distinct users with activity that day.
+    Active = distinct users with at least one rephrase_success that day.
+    New = first rephrase_success within that week is on that day.
     Returns list of (date_str, new_count, active_count) ordered by date (oldest first).
     """
     if not supabase_client:
@@ -445,7 +446,7 @@ def get_weekly_activity_report() -> List[Tuple[str, int, int]]:
         start_utc = start_est.astimezone(timezone.utc).isoformat()
         end_utc = end_est.astimezone(timezone.utc).isoformat()
 
-        # Fetch all rows (Supabase default limit is 1000; paginate to get full week)
+        # Fetch only rephrase_success rows in the week window
         all_data: List[dict] = []
         page_size = 1000
         offset = 0
@@ -453,6 +454,7 @@ def get_weekly_activity_report() -> List[Tuple[str, int, int]]:
             result = (
                 supabase_client.table("activity_logs")
                 .select("user_id, timestamp")
+                .eq("action_type", "rephrase_success")
                 .gte("timestamp", start_utc)
                 .lte("timestamp", end_utc)
                 .range(offset, offset + page_size - 1)
@@ -467,13 +469,14 @@ def get_weekly_activity_report() -> List[Tuple[str, int, int]]:
         if not all_data:
             return _empty_week_rows(start_est)
 
-        # Users who had activity before this week (pre-fill "seen" so "new" = first appearance in window)
+        # Users who had rephrase_success before this week (so "new" = first success in window)
         seen_user_ids: set = set()
         offset_pre = 0
         while True:
             result_pre = (
                 supabase_client.table("activity_logs")
                 .select("user_id")
+                .eq("action_type", "rephrase_success")
                 .lt("timestamp", start_utc)
                 .range(offset_pre, offset_pre + page_size - 1)
                 .execute()
@@ -486,7 +489,7 @@ def get_weekly_activity_report() -> List[Tuple[str, int, int]]:
                 break
             offset_pre += page_size
 
-        # (user_id, date_est) for each activity in the week
+        # (user_id, date_est) for each rephrase_success in the week
         active_by_day: Dict[str, set] = defaultdict(set)
         for row in all_data:
             uid = int(row["user_id"])
@@ -497,7 +500,7 @@ def get_weekly_activity_report() -> List[Tuple[str, int, int]]:
             day_str = dt.strftime("%Y-%m-%d")
             active_by_day[day_str].add(uid)
 
-        # New on day D = first appearance in window (same as notebook N-day: day_user_ids - seen_user_ids)
+        # New on day D = first rephrase_success in window on that day
         out: List[Tuple[str, int, int]] = []
         for i in range(7):
             d = start_est + timedelta(days=i)
