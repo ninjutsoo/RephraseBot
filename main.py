@@ -1110,10 +1110,10 @@ async def handle_channel_post(message: dict) -> None:
     try:
         day_rows = (
             supabase_client.table("daily_channel_posts")
-            .select("id, day_index, tweet_url, reply_text")
+            .select("id, day_index, tweet_url, reply_text, channel_message_date")
             .eq("channel_chat_id", chat_id)
             .eq("day_est", day_est.isoformat())
-            .order("day_index", desc=False)
+            .order("channel_message_date", desc=False)
             .execute()
         )
         rows = day_rows.data or []
@@ -1857,10 +1857,10 @@ async def webhook(req: Request):
             try:
                 day_rows = (
                     supabase_client.table("daily_channel_posts")
-                    .select("id, day_index, tweet_url, reply_text")
+                    .select("id, day_index, tweet_url, reply_text, channel_message_date")
                     .eq("channel_chat_id", chan_id)
                     .eq("day_est", day_str)
-                    .order("day_index", desc=False)
+                    .order("channel_message_date", desc=False)
                     .execute()
                 )
                 rows = day_rows.data or []
@@ -1874,7 +1874,7 @@ async def webhook(req: Request):
             # Build compact horizontal rows of buttons (e.g. 4 per row)
             buttons = [
                 {
-                    "text": f"{row.get('day_index', i + 1)}️⃣",
+                    "text": f"{i + 1}️⃣",
                     "callback_data": f"daily_post:{row['id']}",
                 }
                 for i, row in enumerate(rows)
