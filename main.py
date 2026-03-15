@@ -980,6 +980,10 @@ def contains_arabic_script(text: str) -> bool:
 # the NEXT qualifying message is treated as the "last message" for that day.
 channel_daily_trigger_state: Dict[tuple, bool] = {}
 
+# In-memory map of "result message" IDs for the daily channel flow.
+# Keyed by chat_id so we can edit the same message instead of sending new ones.
+daily_result_messages: Dict[int, int] = {}
+
 
 _TRIGGER_MARKER_RE = re.compile(r"([^\s/]+)/\1")
 
@@ -1117,7 +1121,7 @@ async def handle_channel_post(message: dict) -> None:
         print(f"⚠ Failed to fetch daily_channel_posts for notification: {e}")
         return
 
-    # Only notify once we have at least 5 posts for the day
+    # Only notify once we have at least 1 saved post for the day
     if not rows:
         return
     # If this channel/day is "armed" by a trigger message, this is the
@@ -1129,6 +1133,24 @@ async def handle_channel_post(message: dict) -> None:
         channel_daily_trigger_state.pop(key, None)
 
         target_user_id = 422339974
+
+        # Build a short summary of today's tweets so the admin knows what will be used.
+        # Example:
+        # tweet 1: "Good for Sweden The rest"
+        # tweet 2: "Another example of text"
+        preview_lines: List[str] = []
+        for idx, row in enumerate(rows, start=1):
+            text_preview = (row.get("reply_text") or "").strip()
+            if not text_preview:
+                continue
+            words = text_preview.split()
+            first_words = " ".join(words[:5])
+            preview_lines.append(f'tweet {idx}: "{first_words}"')
+            if idx >= 10:
+                # Avoid overlong summaries; 10 is plenty for a quick review.
+                break
+
+        previews_block = "\n".join(preview_lines) if preview_lines else "No preview text available."
         # Permission request keyboard
         confirm_data = f"daily_confirm:{chat_id}:{day_est.isoformat()}"
         keyboard = {
@@ -1143,6 +1165,8 @@ async def handle_channel_post(message: dict) -> None:
         }
         message_text = (
             "Today's tweets from your test channel are ready.\n\n"
+            "Preview:\n"
+            f"{previews_block}\n\n"
             "Do you want to see them with rephrase buttons now?"
         )
         await telegram_send_message(target_user_id, message_text, reply_markup=keyboard)
@@ -1847,19 +1871,23 @@ async def webhook(req: Request):
             if not rows:
                 return {"ok": True}
 
-            inline_keyboard = [
-                [
-                    {
-                        "text": f"{row.get('day_index', i + 1)}️⃣",
-                        "callback_data": f"daily_post:{row['id']}",
-                    }
-                ]
+            # Build compact horizontal rows of buttons (e.g. 4 per row)
+            buttons = [
+                {
+                    "text": f"{row.get('day_index', i + 1)}️⃣",
+                    "callback_data": f"daily_post:{row['id']}",
+                }
                 for i, row in enumerate(rows)
                 if row.get("id") is not None
             ]
 
-            if not inline_keyboard:
+            if not buttons:
                 return {"ok": True}
+
+            row_size = 4
+            inline_keyboard = [
+                buttons[i : i + row_size] for i in range(0, len(buttons), row_size)
+            ]
 
             keyboard = {"inline_keyboard": inline_keyboard}
 
@@ -2458,31 +2486,45 @@ async def webhook(req: Request):
                 }
                 print(f"DEBUG: Adding Post on X button for text-only rephrase ({len(clean_text)} chars)")
 
-        # For daily channel posts, edit the original message (with buttons)
-        # instead of sending a new one to avoid clutter.
-        if message.get("_from_daily_channel") and message.get("_callback_message_id"):
-            source_message_id = message["_callback_message_id"]
-            original_reply_markup = message.get("_callback_reply_markup")
-
-            # Keep the original header text and append the rephrased tweet below.
-            header_text = (
-                "Hi, you can now start tweeting.\n\n"
-                "These buttons represent today's posts from your test channel.\n"
-                "Tap a button to get a rephrased reply for that post.\n\n"
-            )
-            edited_text = header_text + final_message
-
+        # For daily channel posts, reuse a single result message per chat by editing it.
+        if message.get("_from_daily_channel"):
+            send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             edit_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+
             payload = {
                 "chat_id": chat_id,
-                "message_id": source_message_id,
-                "text": edited_text,
+                "text": final_message,
+                "disable_web_page_preview": True,
+                "allow_sending_without_reply": True,
             }
-            if original_reply_markup:
-                payload["reply_markup"] = original_reply_markup
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
 
-            async with httpx.AsyncClient() as http:
-                await http.post(edit_url, json=payload)
+            existing_id = daily_result_messages.get(chat_id)
+            if existing_id:
+                edit_payload = {
+                    "chat_id": chat_id,
+                    "message_id": existing_id,
+                    "text": final_message,
+                }
+                if reply_markup:
+                    edit_payload["reply_markup"] = reply_markup
+
+                async with httpx.AsyncClient(timeout=20) as http:
+                    try:
+                        await http.post(edit_url, json=edit_payload)
+                    except Exception as e:
+                        print(f"⚠ Failed to edit daily result message: {e}")
+            else:
+                async with httpx.AsyncClient(timeout=20) as http:
+                    try:
+                        r = await http.post(send_url, json=payload)
+                        r.raise_for_status()
+                        data = r.json()
+                        if data.get("ok") and data.get("result"):
+                            daily_result_messages[chat_id] = data["result"]["message_id"]
+                    except Exception as e:
+                        print(f"⚠ Failed to send daily result message: {e}")
         else:
             await telegram_send_message(chat_id, final_message, reply_markup=reply_markup)
         
