@@ -1843,55 +1843,57 @@ async def webhook(req: Request):
 
             # Handle style selector button presses
             if data.startswith("tone_"):
-            pending_selections[user_id]["tone"] = data.split("_")[1]
-            await update_style_selector(callback)
-        elif data.startswith("length_"):
-            pending_selections[user_id]["length"] = data.split("_")[1]
-            await update_style_selector(callback)
-        elif data.startswith("var_"):
-            pending_selections[user_id]["variation"] = data.split("_")[1]
-            await update_style_selector(callback)
+                pending_selections[user_id]["tone"] = data.split("_")[1]
+                await update_style_selector(callback)
+            elif data.startswith("length_"):
+                pending_selections[user_id]["length"] = data.split("_")[1]
+                await update_style_selector(callback)
+            elif data.startswith("var_"):
+                pending_selections[user_id]["variation"] = data.split("_")[1]
+                await update_style_selector(callback)
             elif data == "generate":
-            # User confirmed - save preferences
-            # Safety check: Only allow pro users to save preferences (exempt users are NOT pro)
-            is_pro = is_pro_user(user_id) if user_id else False
-            if not is_pro:
-                chat_id = callback["message"]["chat"]["id"]
-                await telegram_send_message(chat_id, "⚠️ This feature is only available for Pro users.")
-                return {"ok": True}
-            
-            selection = pending_selections[user_id]
-            save_user_preferences(user_id, 
-                                tone=selection["tone"],
-                                length=selection["length"],
-                                variation=selection["variation"])
-            
-            chat_id = selection["chat_id"]
-            user_text = selection["original_text"]
-            
-            # Delete the selection message
-            message_id = callback["message"]["message_id"]
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
-            async with httpx.AsyncClient() as http:
-                await http.post(url, json={"chat_id": chat_id, "message_id": message_id})
-            
-            # Check if this was from /settings command (placeholder text)
-            if user_text == "📝 Send me the text you want to rephrase after choosing your style.":
-                # Just confirm and wait for user to send actual text
-                await telegram_send_message(chat_id, "✅ Preferences saved! Now send me the text you want to rephrase.")
-                # Clean up and return
-                del pending_selections[user_id]
-                return {"ok": True}
-            
-            # Continue to rephrasing logic below by creating a synthetic message
-            message = {
-                "from": callback["from"],
-                "chat": callback["message"]["chat"],
-                "text": user_text,
-                "forward_origin": {"type": "user"},  # Fake forward to bypass check
-                "_skip_style_selector": True,  # Flag to skip showing selector again
-            }
-            # Don't return, let it fall through to rephrasing logic
+                # User confirmed - save preferences
+                # Safety check: Only allow pro users to save preferences (exempt users are NOT pro)
+                is_pro = is_pro_user(user_id) if user_id else False
+                if not is_pro:
+                    chat_id = callback["message"]["chat"]["id"]
+                    await telegram_send_message(chat_id, "⚠️ This feature is only available for Pro users.")
+                    return {"ok": True}
+                
+                selection = pending_selections[user_id]
+                save_user_preferences(
+                    user_id,
+                    tone=selection["tone"],
+                    length=selection["length"],
+                    variation=selection["variation"],
+                )
+                
+                chat_id = selection["chat_id"]
+                user_text = selection["original_text"]
+                
+                # Delete the selection message
+                message_id = callback["message"]["message_id"]
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
+                async with httpx.AsyncClient() as http:
+                    await http.post(url, json={"chat_id": chat_id, "message_id": message_id})
+                
+                # Check if this was from /settings command (placeholder text)
+                if user_text == "📝 Send me the text you want to rephrase after choosing your style.":
+                    # Just confirm and wait for user to send actual text
+                    await telegram_send_message(chat_id, "✅ Preferences saved! Now send me the text you want to rephrase.")
+                    # Clean up and return
+                    del pending_selections[user_id]
+                    return {"ok": True}
+                
+                # Continue to rephrasing logic below by creating a synthetic message
+                message = {
+                    "from": callback["from"],
+                    "chat": callback["message"]["chat"],
+                    "text": user_text,
+                    "forward_origin": {"type": "user"},  # Fake forward to bypass check
+                    "_skip_style_selector": True,  # Flag to skip showing selector again
+                }
+                # Don't return, let it fall through to rephrasing logic
         # For style-selector callbacks that don't create a synthetic message,
         # we're done after handling the callback.
         if not (data == "generate" or data.startswith("daily_post:")):
