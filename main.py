@@ -183,6 +183,10 @@ TELEGRAM_WEBHOOK_SECRET_TOKEN = os.environ.get("TELEGRAM_WEBHOOK_SECRET_TOKEN")
 # Can be channel username (e.g., "mychannel") or channel ID (e.g., "-1001234567890")
 ALLOWED_FORWARD_CHANNEL = os.environ.get("ALLOWED_FORWARD_CHANNEL")
 
+# Optional: Source channel whose posts are auto-captured for daily tweeting
+# Can be channel username (e.g., "mychannel") or channel ID (e.g., "-1001234567890")
+TEST_CHANNEL = os.environ.get("TEST_CHANNEL")
+
 # Rate limiting: seconds a user must wait between requests
 # Set to 0 to disable rate limiting
 RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "30"))
@@ -971,6 +975,151 @@ def contains_arabic_script(text: str) -> bool:
     return bool(_ARABIC_SCRIPT_RE.search(text or ""))
 
 
+async def handle_channel_post(message: dict) -> None:
+    """
+    Handle posts coming directly from a configured channel (TEST_CHANNEL).
+    Save qualifying English-only posts (with or without X link) into daily_channel_posts
+    and notify the configured user with buttons to rephrase each post.
+    """
+    if not supabase_client or not TEST_CHANNEL:
+        return
+
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    chat_username = (chat.get("username") or "").lower()
+    if chat_id is None:
+        return
+
+    # Match TEST_CHANNEL by ID or username
+    target = TEST_CHANNEL.strip()
+    is_match = False
+    if target:
+        if target.startswith("-") or target.isdigit():
+            is_match = str(chat_id) == target
+        else:
+            target_username = target.lstrip("@").lower()
+            is_match = chat_username == target_username
+
+    if not is_match:
+        return
+
+    # Extract text or caption
+    text = message.get("text") or message.get("caption") or ""
+    if not text.strip():
+        return
+
+    # Detect X/Twitter link and strip it for language validation / reply text
+    tweet_id = extract_tweet_id(text)
+    cleaned_text = text
+    if tweet_id:
+        pattern = r'https?://(?:twitter\.com|x\.com|mobile\.twitter\.com)/\S+\s*'
+        cleaned_text = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+
+    # Require English-only style (no Arabic script)
+    if contains_arabic_script(cleaned_text):
+        return
+
+    if not cleaned_text.strip():
+        # Nothing meaningful to save
+        return
+
+    # Derive EST day from Telegram date (Unix seconds UTC)
+    ts = message.get("date")
+    if ts is None:
+        return
+    dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
+    dt_est = dt_utc.astimezone(EST)
+    day_est = dt_est.date()
+
+    # Compute day_index = 1 + existing posts for this channel/day
+    try:
+        result = (
+            supabase_client.table("daily_channel_posts")
+            .select("id", count="exact")
+            .eq("channel_chat_id", chat_id)
+            .eq("day_est", day_est.isoformat())
+            .limit(0)
+            .execute()
+        )
+        existing_count = result.count or 0
+    except Exception as e:
+        print(f"⚠ Failed to count daily_channel_posts for channel {chat_id}: {e}")
+        return
+
+    day_index = existing_count + 1
+
+    tweet_url = ""
+    if tweet_id:
+        tweet_url = f"https://x.com/i/status/{tweet_id}"
+
+    # Insert into daily_channel_posts
+    try:
+        supabase_client.table("daily_channel_posts").insert(
+            {
+                "day_est": day_est.isoformat(),
+                "day_index": day_index,
+                "channel_chat_id": chat_id,
+                "channel_message_id": message.get("message_id"),
+                "channel_message_date": dt_utc.isoformat(),
+                "tweet_url": tweet_url or "",
+                "reply_text": cleaned_text,
+            }
+        ).execute()
+        print(
+            f"✓ Saved channel post from {chat_id} for {day_est} "
+            f"(index {day_index}, tweet_id={tweet_id or 'none'})"
+        )
+    except Exception as e:
+        print(f"⚠ Failed to insert daily_channel_posts row: {e}")
+        return
+
+    # After saving, fetch all posts for this day/channel to build buttons
+    try:
+        day_rows = (
+            supabase_client.table("daily_channel_posts")
+            .select("id, day_index, tweet_url, reply_text")
+            .eq("channel_chat_id", chat_id)
+            .eq("day_est", day_est.isoformat())
+            .order("day_index", desc=False)
+            .execute()
+        )
+        rows = day_rows.data or []
+    except Exception as e:
+        print(f"⚠ Failed to fetch daily_channel_posts for notification: {e}")
+        return
+
+    # Only notify once we have at least 5 posts for the day
+    if not rows or len(rows) < 5:
+        return
+
+    # Build one button per saved post for the day
+    inline_keyboard = [
+        [
+            {
+                "text": f"{row.get('day_index', i + 1)}️⃣",
+                "callback_data": f"daily_post:{row['id']}",
+            }
+        ]
+        for i, row in enumerate(rows)
+        if row.get("id") is not None
+    ]
+
+    if not inline_keyboard:
+        return
+
+    keyboard = {"inline_keyboard": inline_keyboard}
+
+    # Fixed target user to notify
+    target_user_id = 422339974
+    message_text = (
+        "Hi, you can now start tweeting.\n\n"
+        "These buttons represent today's posts from your test channel.\n"
+        "Tap a button to get a rephrased reply for that post."
+    )
+
+    await telegram_send_message(target_user_id, message_text, reply_markup=keyboard)
+
+
 def has_forwarded_media(message: dict) -> bool:
     """
     Check if message contains forwarded media (photo, video, document, etc.).
@@ -1627,6 +1776,13 @@ async def webhook(req: Request):
 
     update = await req.json()
 
+    # Handle direct channel posts (bot is admin in the channel)
+    if TEST_CHANNEL and ("channel_post" in update or "edited_channel_post" in update):
+        channel_msg = update.get("channel_post") or update.get("edited_channel_post")
+        if channel_msg:
+            await handle_channel_post(channel_msg)
+        return {"ok": True}
+
     # Handle callback queries (button presses)
     if "callback_query" in update:
         callback = update["callback_query"]
@@ -1687,14 +1843,55 @@ async def webhook(req: Request):
                 "chat": callback["message"]["chat"],
                 "text": user_text,
                 "forward_origin": {"type": "user"},  # Fake forward to bypass check
-                "_skip_style_selector": True  # Flag to skip showing selector again
+                "_skip_style_selector": True,  # Flag to skip showing selector again
             }
             # Don't return, let it fall through to rephrasing logic
+        elif data.startswith("daily_post:"):
+            # User tapped one of the daily channel buttons
+            try:
+                row_id = int(data.split(":", 1)[1])
+            except ValueError:
+                return {"ok": True}
+
+            if not supabase_client:
+                return {"ok": True}
+
+            try:
+                result = (
+                    supabase_client.table("daily_channel_posts")
+                    .select("tweet_url, reply_text")
+                    .eq("id", row_id)
+                    .single()
+                    .execute()
+                )
+                row = result.data or {}
+            except Exception as e:
+                print(f"⚠ Failed to load daily_channel_posts row {row_id}: {e}")
+                return {"ok": True}
+
+            reply_text = row.get("reply_text") or ""
+            tweet_url = row.get("tweet_url") or ""
+
+            if not reply_text.strip():
+                return {"ok": True}
+
+            combined_text = f"{tweet_url} {reply_text}".strip() if tweet_url else reply_text
+
+            # Synthetic message so we can reuse the normal rephrase pipeline
+            message = {
+                "from": callback["from"],
+                "chat": callback["message"]["chat"],
+                "text": combined_text,
+                "forward_origin": {"type": "channel"},
+                "_skip_style_selector": True,
+                "_from_daily_channel": True,
+            }
         else:
             return {"ok": True}
         
-        # If not "generate", we're done
-        if data != "generate":
+        # For selector updates and other callbacks that don't create a synthetic message,
+        # we're done after handling the callback.
+        if data not in ("generate",) and not data.startswith("daily_post:"):
             return {"ok": True}
     else:
         message = update.get("message") or update.get("edited_message")
@@ -1902,8 +2099,9 @@ async def webhook(req: Request):
         else:
             return {"ok": True}
     
-    # Forward requirement: Only act on forwarded messages (exempt users and Pro users bypass this)
-    if not is_exempt_user and not is_pro:
+    # Forward requirement: Only act on forwarded messages (exempt users and Pro users bypass this).
+    # Synthetic messages created from daily channel posts also bypass this check.
+    if not is_exempt_user and not is_pro and not message.get("_from_daily_channel"):
         if not is_forwarded(message):
             await telegram_send_message(chat_id, "Please forward a message to me, and I'll rephrase it.")
             return {"ok": True}

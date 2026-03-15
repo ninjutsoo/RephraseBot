@@ -15,6 +15,7 @@ When you make a mistake or the user gives feedback that reveals a better rule: a
 - **No persistent test files** unless the user says to save or reuse them.
 - **Example/config files**: Production/real config only; no test-only or temporary vars; remove them when the test is done.
 - **Clean up after fixes**: If an edit fixes a bug, remove any obsolete or failed attempts; don’t leave dead code.
+ - **Supabase DB schema mirror**: Maintain a local Postgres schema file at `.cursor/db_schema.sql` that is ignored by git and mirrors the Supabase database. When the user confirms a DB change in Supabase, update this schema file to match.
 
 ---
 

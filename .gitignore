@@ -19,3 +19,6 @@ venv.bak/
 
 *.log
 
+# Cursor metadata and local DB schema (not tracked)
+.cursor/
+
