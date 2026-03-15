@@ -975,6 +975,26 @@ def contains_arabic_script(text: str) -> bool:
     return bool(_ARABIC_SCRIPT_RE.search(text or ""))
 
 
+# In-memory per-day trigger state for channels:
+# when a "x/x" marker message is seen (e.g. 8/8, 3/3, تب/تب),
+# the NEXT qualifying message is treated as the "last message" for that day.
+channel_daily_trigger_state: Dict[tuple, bool] = {}
+
+
+_TRIGGER_MARKER_RE = re.compile(r"([^\s/]+)/\1")
+
+
+def is_daily_trigger_message(text: str) -> bool:
+    """
+    Return True if text contains a marker of the form X/X where the two
+    sides are identical (e.g. 3/3, 10/10, تب/تب).
+    Used to mark that the NEXT message is the final tweet for the day.
+    """
+    if not text:
+        return False
+    return bool(_TRIGGER_MARKER_RE.search(text))
+
+
 async def handle_channel_post(message: dict) -> None:
     """
     Handle posts coming directly from a configured channel (TEST_CHANNEL).
@@ -1003,9 +1023,25 @@ async def handle_channel_post(message: dict) -> None:
     if not is_match:
         return
 
+    # Derive EST day from Telegram date (Unix seconds UTC)
+    ts = message.get("date")
+    if ts is None:
+        return
+    dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
+    dt_est = dt_utc.astimezone(EST)
+    day_est = dt_est.date()
+
     # Extract text or caption
     text = message.get("text") or message.get("caption") or ""
     if not text.strip():
+        return
+
+    # First, detect if this is the daily trigger marker (e.g. 8/8, 3/3, تب/تب).
+    # If so, mark the channel/day as "armed" and do NOT save this message.
+    if is_daily_trigger_message(text):
+        key = (chat_id, day_est.isoformat())
+        channel_daily_trigger_state[key] = True
+        print(f"✓ Daily trigger received for channel {chat_id} on {day_est}")
         return
 
     # Detect X/Twitter link and strip it for language validation / reply text
@@ -1022,14 +1058,6 @@ async def handle_channel_post(message: dict) -> None:
     if not cleaned_text.strip():
         # Nothing meaningful to save
         return
-
-    # Derive EST day from Telegram date (Unix seconds UTC)
-    ts = message.get("date")
-    if ts is None:
-        return
-    dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
-    dt_est = dt_utc.astimezone(EST)
-    day_est = dt_est.date()
 
     # Compute day_index = 1 + existing posts for this channel/day
     try:
@@ -1073,7 +1101,8 @@ async def handle_channel_post(message: dict) -> None:
         print(f"⚠ Failed to insert daily_channel_posts row: {e}")
         return
 
-    # After saving, fetch all posts for this day/channel to build buttons
+    # After saving, fetch all posts for this day/channel to build buttons or
+    # to know how many we have for permission prompt.
     try:
         day_rows = (
             supabase_client.table("daily_channel_posts")
@@ -1089,35 +1118,34 @@ async def handle_channel_post(message: dict) -> None:
         return
 
     # Only notify once we have at least 5 posts for the day
-    if not rows or len(rows) < 5:
+    if not rows:
         return
+    # If this channel/day is "armed" by a trigger message, this is the
+    # final tweet of the day. Ask the owner for permission before sending
+    # the main buttons message.
+    key = (chat_id, day_est.isoformat())
+    if channel_daily_trigger_state.get(key):
+        # Clear the armed state; we're done for this day/channel.
+        channel_daily_trigger_state.pop(key, None)
 
-    # Build one button per saved post for the day
-    inline_keyboard = [
-        [
-            {
-                "text": f"{row.get('day_index', i + 1)}️⃣",
-                "callback_data": f"daily_post:{row['id']}",
-            }
-        ]
-        for i, row in enumerate(rows)
-        if row.get("id") is not None
-    ]
-
-    if not inline_keyboard:
-        return
-
-    keyboard = {"inline_keyboard": inline_keyboard}
-
-    # Fixed target user to notify
-    target_user_id = 422339974
-    message_text = (
-        "Hi, you can now start tweeting.\n\n"
-        "These buttons represent today's posts from your test channel.\n"
-        "Tap a button to get a rephrased reply for that post."
-    )
-
-    await telegram_send_message(target_user_id, message_text, reply_markup=keyboard)
+        target_user_id = 422339974
+        # Permission request keyboard
+        confirm_data = f"daily_confirm:{chat_id}:{day_est.isoformat()}"
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ Yes, show today's tweets",
+                        "callback_data": confirm_data,
+                    }
+                ]
+            ]
+        }
+        message_text = (
+            "Today's tweets from your test channel are ready.\n\n"
+            "Do you want to see them with rephrase buttons now?"
+        )
+        await telegram_send_message(target_user_id, message_text, reply_markup=keyboard)
 
 
 def has_forwarded_media(message: dict) -> bool:
@@ -1789,8 +1817,62 @@ async def webhook(req: Request):
         user_id = callback["from"]["id"]
         data = callback["data"]
 
-        # Daily post buttons are independent of style selections and should NOT
+        # Daily flow callbacks are independent of style selections and should NOT
         # be blocked by pending_selections. Handle them first.
+        if data.startswith("daily_confirm:"):
+            # Permission granted to show today's tweets with buttons
+            try:
+                _, chan_str, day_str = data.split(":", 2)
+                chan_id = int(chan_str)
+            except Exception:
+                return {"ok": True}
+
+            if not supabase_client:
+                return {"ok": True}
+
+            try:
+                day_rows = (
+                    supabase_client.table("daily_channel_posts")
+                    .select("id, day_index, tweet_url, reply_text")
+                    .eq("channel_chat_id", chan_id)
+                    .eq("day_est", day_str)
+                    .order("day_index", desc=False)
+                    .execute()
+                )
+                rows = day_rows.data or []
+            except Exception as e:
+                print(f"⚠ Failed to fetch daily_channel_posts for confirm {chan_id} {day_str}: {e}")
+                return {"ok": True}
+
+            if not rows:
+                return {"ok": True}
+
+            inline_keyboard = [
+                [
+                    {
+                        "text": f"{row.get('day_index', i + 1)}️⃣",
+                        "callback_data": f"daily_post:{row['id']}",
+                    }
+                ]
+                for i, row in enumerate(rows)
+                if row.get("id") is not None
+            ]
+
+            if not inline_keyboard:
+                return {"ok": True}
+
+            keyboard = {"inline_keyboard": inline_keyboard}
+
+            target_user_id = 422339974
+            message_text = (
+                "Hi, you can now start tweeting.\n\n"
+                "These buttons represent today's posts from your test channel.\n"
+                "Tap a button to get a rephrased reply for that post."
+            )
+
+            await telegram_send_message(target_user_id, message_text, reply_markup=keyboard)
+            return {"ok": True}
+
         if data.startswith("daily_post:"):
             # User tapped one of the daily channel buttons
             try:
@@ -1822,7 +1904,9 @@ async def webhook(req: Request):
 
             combined_text = f"{tweet_url} {reply_text}".strip() if tweet_url else reply_text
 
-            # Synthetic message so we can reuse the normal rephrase pipeline
+            # Synthetic message so we can reuse the normal rephrase pipeline.
+            # Also keep track of the original message so we can EDIT it later
+            # instead of sending a new one (to avoid clutter).
             message = {
                 "from": callback["from"],
                 "chat": callback["message"]["chat"],
@@ -1830,6 +1914,8 @@ async def webhook(req: Request):
                 "forward_origin": {"type": "channel"},
                 "_skip_style_selector": True,
                 "_from_daily_channel": True,
+                "_callback_message_id": callback["message"]["message_id"],
+                "_callback_reply_markup": callback["message"].get("reply_markup"),
             }
 
             # Fall through to normal message handling below
@@ -2372,7 +2458,33 @@ async def webhook(req: Request):
                 }
                 print(f"DEBUG: Adding Post on X button for text-only rephrase ({len(clean_text)} chars)")
 
-        await telegram_send_message(chat_id, final_message, reply_markup=reply_markup)
+        # For daily channel posts, edit the original message (with buttons)
+        # instead of sending a new one to avoid clutter.
+        if message.get("_from_daily_channel") and message.get("_callback_message_id"):
+            source_message_id = message["_callback_message_id"]
+            original_reply_markup = message.get("_callback_reply_markup")
+
+            # Keep the original header text and append the rephrased tweet below.
+            header_text = (
+                "Hi, you can now start tweeting.\n\n"
+                "These buttons represent today's posts from your test channel.\n"
+                "Tap a button to get a rephrased reply for that post.\n\n"
+            )
+            edited_text = header_text + final_message
+
+            edit_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+            payload = {
+                "chat_id": chat_id,
+                "message_id": source_message_id,
+                "text": edited_text,
+            }
+            if original_reply_markup:
+                payload["reply_markup"] = original_reply_markup
+
+            async with httpx.AsyncClient() as http:
+                await http.post(edit_url, json=payload)
+        else:
+            await telegram_send_message(chat_id, final_message, reply_markup=reply_markup)
         
         # Calculate response time
         response_time_ms = int((time.time() - request_start_time) * 1000)
