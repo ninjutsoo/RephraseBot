@@ -2099,13 +2099,13 @@ async def webhook(req: Request):
         if len(final_message) > 3500:
             final_message = final_message[:3500] + "\n\n[truncated]"
 
-        # If X link was detected earlier, create reply button with ONLY the rephrased text
+        # If X link was detected earlier, create reply button with ONLY the rephrased text.
+        # If text-only (no X link), add a single "Post on X" button.
         reply_markup = None
-        
+        from urllib.parse import quote
+
         if tweet_id:
             # Create X Web Intent URL with rephrased text pre-filled (without X link)
-            from urllib.parse import quote
-            
             # Ensure final_message doesn't contain any X links
             clean_reply = re.sub(
                 r'https?://(?:twitter\.com|x\.com|mobile\.twitter\.com)/\S+\s*',
@@ -2148,6 +2148,26 @@ async def webhook(req: Request):
             
             # For X posts, show the clean reply text in Telegram too (without the X link)
             final_message = clean_reply
+        else:
+            # Text-only (no X link): rephrase only, then single "Post on X" button (new tweet, not reply).
+            # X limit for a post (not reply) is 280 characters; same as reply.
+            clean_text = re.sub(
+                r'https?://(?:twitter\.com|x\.com|mobile\.twitter\.com)/\S+\s*',
+                '',
+                final_message,
+                flags=re.IGNORECASE
+            ).strip()
+            if clean_text:
+                if len(clean_text) > 280:
+                    clean_text = clean_text[:277] + "..."
+                encoded_text = quote(clean_text)
+                post_intent_url = f"https://twitter.com/intent/tweet?text={encoded_text}"
+                reply_markup = {
+                    "inline_keyboard": [
+                        [{"text": "📤 Post on X", "url": post_intent_url}]
+                    ]
+                }
+                print(f"DEBUG: Adding Post on X button for text-only rephrase ({len(clean_text)} chars)")
 
         await telegram_send_message(chat_id, final_message, reply_markup=reply_markup)
         
