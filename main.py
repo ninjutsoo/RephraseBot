@@ -1788,15 +1788,61 @@ async def webhook(req: Request):
         callback = update["callback_query"]
         user_id = callback["from"]["id"]
         data = callback["data"]
-        
-        if user_id not in pending_selections:
-            # Selection expired
-            chat_id = callback["message"]["chat"]["id"]
-            await telegram_send_message(chat_id, "⚠️ Selection expired. Please forward the message again.")
-            return {"ok": True}
-        
-        # Handle button presses
-        if data.startswith("tone_"):
+
+        # Daily post buttons are independent of style selections and should NOT
+        # be blocked by pending_selections. Handle them first.
+        if data.startswith("daily_post:"):
+            # User tapped one of the daily channel buttons
+            try:
+                row_id = int(data.split(":", 1)[1])
+            except ValueError:
+                return {"ok": True}
+
+            if not supabase_client:
+                return {"ok": True}
+
+            try:
+                result = (
+                    supabase_client.table("daily_channel_posts")
+                    .select("tweet_url, reply_text")
+                    .eq("id", row_id)
+                    .single()
+                    .execute()
+                )
+                row = result.data or {}
+            except Exception as e:
+                print(f"⚠ Failed to load daily_channel_posts row {row_id}: {e}")
+                return {"ok": True}
+
+            reply_text = row.get("reply_text") or ""
+            tweet_url = row.get("tweet_url") or ""
+
+            if not reply_text.strip():
+                return {"ok": True}
+
+            combined_text = f"{tweet_url} {reply_text}".strip() if tweet_url else reply_text
+
+            # Synthetic message so we can reuse the normal rephrase pipeline
+            message = {
+                "from": callback["from"],
+                "chat": callback["message"]["chat"],
+                "text": combined_text,
+                "forward_origin": {"type": "channel"},
+                "_skip_style_selector": True,
+                "_from_daily_channel": True,
+            }
+
+            # Fall through to normal message handling below
+        else:
+            # Style-selector callbacks rely on pending_selections
+            if user_id not in pending_selections:
+                # Selection expired
+                chat_id = callback["message"]["chat"]["id"]
+                await telegram_send_message(chat_id, "⚠️ Selection expired. Please forward the message again.")
+                return {"ok": True}
+
+            # Handle style selector button presses
+            if data.startswith("tone_"):
             pending_selections[user_id]["tone"] = data.split("_")[1]
             await update_style_selector(callback)
         elif data.startswith("length_"):
@@ -1805,7 +1851,7 @@ async def webhook(req: Request):
         elif data.startswith("var_"):
             pending_selections[user_id]["variation"] = data.split("_")[1]
             await update_style_selector(callback)
-        elif data == "generate":
+            elif data == "generate":
             # User confirmed - save preferences
             # Safety check: Only allow pro users to save preferences (exempt users are NOT pro)
             is_pro = is_pro_user(user_id) if user_id else False
@@ -1846,52 +1892,9 @@ async def webhook(req: Request):
                 "_skip_style_selector": True,  # Flag to skip showing selector again
             }
             # Don't return, let it fall through to rephrasing logic
-        elif data.startswith("daily_post:"):
-            # User tapped one of the daily channel buttons
-            try:
-                row_id = int(data.split(":", 1)[1])
-            except ValueError:
-                return {"ok": True}
-
-            if not supabase_client:
-                return {"ok": True}
-
-            try:
-                result = (
-                    supabase_client.table("daily_channel_posts")
-                    .select("tweet_url, reply_text")
-                    .eq("id", row_id)
-                    .single()
-                    .execute()
-                )
-                row = result.data or {}
-            except Exception as e:
-                print(f"⚠ Failed to load daily_channel_posts row {row_id}: {e}")
-                return {"ok": True}
-
-            reply_text = row.get("reply_text") or ""
-            tweet_url = row.get("tweet_url") or ""
-
-            if not reply_text.strip():
-                return {"ok": True}
-
-            combined_text = f"{tweet_url} {reply_text}".strip() if tweet_url else reply_text
-
-            # Synthetic message so we can reuse the normal rephrase pipeline
-            message = {
-                "from": callback["from"],
-                "chat": callback["message"]["chat"],
-                "text": combined_text,
-                "forward_origin": {"type": "channel"},
-                "_skip_style_selector": True,
-                "_from_daily_channel": True,
-            }
-        else:
-            return {"ok": True}
-        
-        # For selector updates and other callbacks that don't create a synthetic message,
+        # For style-selector callbacks that don't create a synthetic message,
         # we're done after handling the callback.
-        if data not in ("generate",) and not data.startswith("daily_post:"):
+        if not (data == "generate" or data.startswith("daily_post:")):
             return {"ok": True}
     else:
         message = update.get("message") or update.get("edited_message")
