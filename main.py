@@ -187,6 +187,11 @@ ALLOWED_FORWARD_CHANNEL = os.environ.get("ALLOWED_FORWARD_CHANNEL")
 # Can be channel username (e.g., "mychannel") or channel ID (e.g., "-1001234567890")
 TEST_CHANNEL = os.environ.get("TEST_CHANNEL")
 
+# Daily flow mode: "global" or "test"
+# global: listens to ALLOWED_FORWARD_CHANNEL, sends buttons to Pro users, cleanup on next EST day
+# test:   listens to TEST_CHANNEL, sends buttons to exempt users, cleanup on next channel post after buttons sent
+DAILY_MODE = os.environ.get("DAILY_MODE", "test")
+
 # Rate limiting: seconds a user must wait between requests
 # Set to 0 to disable rate limiting
 RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "30"))
@@ -997,12 +1002,11 @@ daily_buttons_messages: Dict[int, int] = {}
 daily_result_messages: Dict[int, int] = {}
 
 # Track last processed EST day per channel so first message of a new day
-# can trigger cleanup of previous day's UI and DB rows.
-# NOTE: Disabled for test-mode cleanup based on "next message after approval".
-# channel_last_day_est: Dict[int, str] = {}
+# can trigger cleanup of previous day's UI and DB rows. (global mode)
+channel_last_day_est: Dict[int, str] = {}
 
-# For test mode: track which channel/day needs cleanup on the *next* message
-# after approval (keyed by channel_chat_id -> day_est_iso).
+# For test mode: track which channel/day needs cleanup on the *next* channel message
+# after buttons were sent out (keyed by channel_chat_id -> day_est_iso).
 pending_daily_cleanup: Dict[int, str] = {}
 
 
@@ -1020,13 +1024,77 @@ def is_daily_trigger_message(text: str) -> bool:
     return bool(_TRIGGER_MARKER_RE.search(text))
 
 
+def generate_tweet_summaries(rows: List[dict]) -> Dict[int, str]:
+    """
+    Use Gemini to generate a short (<10 word) summary for each tweet.
+    Returns a dict mapping row id -> summary string.
+    """
+    if not rows:
+        return {}
+
+    numbered_tweets = []
+    for idx, row in enumerate(rows, start=1):
+        text = (row.get("reply_text") or "").strip()
+        if text:
+            numbered_tweets.append(f"{idx}. {text}")
+
+    if not numbered_tweets:
+        return {}
+
+    prompt = (
+        "Summarize each numbered tweet below in LESS THAN 10 WORDS. "
+        "Return ONLY the numbered summaries, one per line, matching the input numbering. "
+        "Do NOT exceed 10 words per summary. No preamble.\n\n"
+        + "\n".join(numbered_tweets)
+    )
+
+    import time as _time
+    for attempt in range(3):
+        try:
+            resp = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+            )
+            text_resp = (getattr(resp, "text", None) or "").strip()
+            break
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                if attempt < 2:
+                    _time.sleep((2 ** attempt) * 2)
+                    continue
+            print(f"⚠ Failed to generate tweet summaries: {e}")
+            return {}
+
+    summaries: Dict[int, str] = {}
+    for line in text_resp.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        match = re.match(r"^(\d+)\.\s*(.+)", line)
+        if match:
+            idx = int(match.group(1))
+            summary = match.group(2).strip().rstrip(".")
+            words = summary.split()
+            if len(words) > 10:
+                summary = " ".join(words[:10])
+            if 1 <= idx <= len(rows):
+                summaries[rows[idx - 1]["id"]] = summary
+
+    return summaries
+
+
 async def handle_channel_post(message: dict) -> None:
     """
-    Handle posts coming directly from a configured channel (TEST_CHANNEL).
+    Handle posts coming directly from the configured source channel.
+    In global mode: listens to ALLOWED_FORWARD_CHANNEL.
+    In test mode:   listens to TEST_CHANNEL.
     Save qualifying English-only posts (with or without X link) into daily_channel_posts
     and notify the configured user with buttons to rephrase each post.
     """
-    if not supabase_client or not TEST_CHANNEL:
+    # Determine which channel to listen to based on mode
+    source_channel = ALLOWED_FORWARD_CHANNEL if DAILY_MODE == "global" else TEST_CHANNEL
+
+    if not supabase_client or not source_channel:
         return
 
     chat = message.get("chat") or {}
@@ -1035,8 +1103,8 @@ async def handle_channel_post(message: dict) -> None:
     if chat_id is None:
         return
 
-    # Match TEST_CHANNEL by ID or username
-    target = TEST_CHANNEL.strip()
+    # Match source channel by ID or username
+    target = source_channel.strip()
     is_match = False
     if target:
         if target.startswith("-") or target.isdigit():
@@ -1057,11 +1125,23 @@ async def handle_channel_post(message: dict) -> None:
     day_est = dt_est.date()
     day_est_iso = day_est.isoformat()
 
-    # TEST MODE: if there's a pending daily cleanup for this channel,
-    # clean up previous day's UI (buttons/results) and DB rows on the
-    # *next* message after approval, regardless of day change.
-    cleanup_day_iso = pending_daily_cleanup.pop(chat_id, None)
-    if cleanup_day_iso:
+    # Determine if cleanup is needed based on mode:
+    # global: first message of a new EST day triggers cleanup of previous day
+    # test:   next message after buttons were sent triggers cleanup
+    needs_cleanup = False
+    cleanup_day_iso = None
+
+    if DAILY_MODE == "global":
+        last_day_iso = channel_last_day_est.get(chat_id)
+        if last_day_iso and last_day_iso != day_est_iso:
+            needs_cleanup = True
+            cleanup_day_iso = last_day_iso
+    else:
+        cleanup_day_iso = pending_daily_cleanup.pop(chat_id, None)
+        if cleanup_day_iso:
+            needs_cleanup = True
+
+    if needs_cleanup and cleanup_day_iso:
         prev_key = (chat_id, cleanup_day_iso)
         # Clear approval state
         daily_approval_state.pop(prev_key, None)
@@ -1081,7 +1161,7 @@ async def handle_channel_post(message: dict) -> None:
                         f"⚠ Failed to delete stale approval message {msg['chat_id']}/{msg['message_id']}: {e}"
                     )
 
-        # Delete daily buttons and their associated result messages
+        # Delete Pro users' daily buttons and their associated result messages
         async with httpx.AsyncClient(timeout=20) as http:
             for user_chat_id, msg_id in list(daily_buttons_messages.items()):
                 try:
@@ -1140,6 +1220,10 @@ async def handle_channel_post(message: dict) -> None:
         pattern = r'https?://(?:twitter\.com|x\.com|mobile\.twitter\.com)/\S+\s*'
         cleaned_text = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
 
+    # Skip posts tagged #Email (those are for the email bot, not rephrase bot)
+    if "#email" in text.lower():
+        return
+
     # Require English-only style (no Arabic script)
     if contains_arabic_script(cleaned_text):
         return
@@ -1195,7 +1279,7 @@ async def handle_channel_post(message: dict) -> None:
     try:
         day_rows = (
             supabase_client.table("daily_channel_posts")
-            .select("id, day_index, tweet_url, reply_text, channel_message_date")
+            .select("id, day_index, tweet_url, reply_text, summary, channel_message_date")
             .eq("channel_chat_id", chat_id)
             .eq("day_est", day_est.isoformat())
             .order("channel_message_date", desc=False)
@@ -1206,32 +1290,46 @@ async def handle_channel_post(message: dict) -> None:
         print(f"⚠ Failed to fetch daily_channel_posts for notification: {e}")
         return
 
-    # NOTE: channel_last_day_est-based cleanup is disabled in test mode.
-    # channel_last_day_est[chat_id] = day_est_iso
+    # Remember last processed day for this channel (for next-day cleanup trigger)
+    channel_last_day_est[chat_id] = day_est_iso
 
     # Only notify once we have at least 1 saved post for the day
     if not rows:
         return
     # If this channel/day is "armed" by a trigger message, this is the
-    # final tweet of the day. Ask exempt users for permission before sending
-    # the main buttons message to Pro users.
+    # final tweet of the day. Generate Gemini summaries for all tweets,
+    # save them to DB, then ask exempt users for approval.
     key = (chat_id, day_est.isoformat())
     if channel_daily_trigger_state.get(key):
         # Clear the armed state; we're done for this day/channel.
         channel_daily_trigger_state.pop(key, None)
 
-        # Build a short summary of today's tweets so approvers know what will be used.
-        # Show ALL saved tweets for the day, in the same order as the buttons:
-        # - If there is an X link and reply text, preview the reply text.
-        # - If there is only English text, preview that text.
+        # Generate <10-word summaries for all tweets via Gemini and persist them.
+        summaries = generate_tweet_summaries(rows)
+        if summaries:
+            for row_id, summary_text in summaries.items():
+                try:
+                    supabase_client.table("daily_channel_posts").update(
+                        {"summary": summary_text}
+                    ).eq("id", row_id).execute()
+                except Exception as e:
+                    print(f"⚠ Failed to save summary for row {row_id}: {e}")
+            # Update in-memory rows so the preview uses summaries right away.
+            for row in rows:
+                if row["id"] in summaries:
+                    row["summary"] = summaries[row["id"]]
+
+        # Build preview using summaries (fall back to first 5 words of reply_text).
         preview_lines: List[str] = []
         for idx, row in enumerate(rows, start=1):
-            text_preview = (row.get("reply_text") or "").strip()
-            if not text_preview:
-                continue
-            words = text_preview.split()
-            first_words = " ".join(words[:5])
-            preview_lines.append(f'tweet {idx}: "{first_words}"')
+            summary = (row.get("summary") or "").strip()
+            if not summary:
+                text_preview = (row.get("reply_text") or "").strip()
+                if not text_preview:
+                    continue
+                words = text_preview.split()
+                summary = " ".join(words[:5])
+            preview_lines.append(f'tweet {idx}: "{summary}"')
 
         previews_block = "\n".join(preview_lines) if preview_lines else "No preview text available."
         # Permission request keyboard
@@ -1247,7 +1345,7 @@ async def handle_channel_post(message: dict) -> None:
             ]
         }
         message_text = (
-            "Today's tweets from your test channel are ready.\n\n"
+            "Today's tweets from your channel are ready.\n\n"
             "Preview:\n"
             f"{previews_block}\n\n"
             "Do you want to see them with rephrase buttons now?"
@@ -1488,7 +1586,7 @@ async def show_style_selector(chat_id: int, user_id: int, original_text: str) ->
                  "callback_data": "var_aggressive"}
             ],
             [
-                {"text": "✅ Generate with these settings", "callback_data": "generate"}
+                {"text": "✅ Apply these settings", "callback_data": "apply_prefs"}
             ]
         ]
     }
@@ -1939,7 +2037,9 @@ async def webhook(req: Request):
     update = await req.json()
 
     # Handle direct channel posts (bot is admin in the channel)
-    if TEST_CHANNEL and ("channel_post" in update or "edited_channel_post" in update):
+    # In global mode: listens to ALLOWED_FORWARD_CHANNEL; in test mode: listens to TEST_CHANNEL
+    source_channel = ALLOWED_FORWARD_CHANNEL if DAILY_MODE == "global" else TEST_CHANNEL
+    if source_channel and ("channel_post" in update or "edited_channel_post" in update):
         channel_msg = update.get("channel_post") or update.get("edited_channel_post")
         if channel_msg:
             await handle_channel_post(channel_msg)
@@ -1978,10 +2078,12 @@ async def webhook(req: Request):
                         print(f"⚠ Failed to delete stale approval message {chat_id}/{message_id}: {e}")
                 return {"ok": True}
 
-            # Mark this day/channel as approved (first approver wins) and
-            # schedule cleanup on the *next* message from this channel.
+            # Mark this day/channel as approved (first approver wins).
             daily_approval_state[approval_key] = True
-            pending_daily_cleanup[chan_id] = day_str
+
+            # In test mode, schedule cleanup on next channel message.
+            if DAILY_MODE != "global":
+                pending_daily_cleanup[chan_id] = day_str
 
             # Clean up all outstanding approval messages for this day/channel, including this one.
             messages = daily_approval_messages.pop(approval_key, [])
@@ -1996,7 +2098,7 @@ async def webhook(req: Request):
             try:
                 day_rows = (
                     supabase_client.table("daily_channel_posts")
-                    .select("id, day_index, tweet_url, reply_text, channel_message_date")
+                    .select("id, day_index, tweet_url, reply_text, summary, channel_message_date")
                     .eq("channel_chat_id", chan_id)
                     .eq("day_est", day_str)
                     .order("channel_message_date", desc=False)
@@ -2030,22 +2132,76 @@ async def webhook(req: Request):
 
             keyboard = {"inline_keyboard": inline_keyboard}
 
+            # Build summary lines for the buttons message
+            summary_lines: List[str] = []
+            for idx, row in enumerate(rows, start=1):
+                summary = (row.get("summary") or "").strip()
+                if not summary:
+                    text_preview = (row.get("reply_text") or "").strip()
+                    words = text_preview.split()
+                    summary = " ".join(words[:5]) if words else "—"
+                summary_lines.append(f"{idx}. {summary}")
+
+            summaries_block = "\n".join(summary_lines)
+
             message_text = (
                 "Hi, you can now start tweeting.\n\n"
-                "These buttons represent today's posts from your test channel.\n"
-                "Tap a button to get a rephrased reply for that post."
+                "These buttons represent today's posts from your channel.\n"
+                "Tap a button to get a rephrased reply for that post.\n\n"
+                f"{summaries_block}"
             )
 
-            # TEST MODE: instead of sending to Pro users, send the daily buttons
-            # to all exempt users (EXEMPT_USER_IDS). Use raw sendMessage so we
-            # can record the exact message_id for reliable cleanup on the next
-            # channel message after approval.
+            # Determine target users based on mode
+            target_user_ids: List[int] = []
+
+            if DAILY_MODE == "global":
+                # Send to active Pro users
+                if supabase_client:
+                    try:
+                        result = supabase_client.table("users").select(
+                            "user_id, is_pro, pro_expires_at, trial_ends_at"
+                        ).execute()
+                        users = result.data or []
+                    except Exception as e:
+                        print(f"⚠ Failed to fetch users for daily_confirm broadcast: {e}")
+                        return {"ok": True}
+
+                    from datetime import datetime, timezone
+
+                    for user in users:
+                        uid = user.get("user_id")
+                        if not uid:
+                            continue
+                        is_pro_flag = False
+                        if user.get("is_pro"):
+                            expires = user.get("pro_expires_at")
+                            if not expires:
+                                is_pro_flag = True
+                            else:
+                                try:
+                                    if datetime.fromisoformat(expires.replace("Z", "+00:00")) > datetime.now(timezone.utc):
+                                        is_pro_flag = True
+                                except Exception:
+                                    is_pro_flag = False
+                        if not is_pro_flag:
+                            trial_ends = user.get("trial_ends_at")
+                            if trial_ends:
+                                try:
+                                    if datetime.fromisoformat(trial_ends.replace("Z", "+00:00")) > datetime.now(timezone.utc):
+                                        is_pro_flag = True
+                                except Exception:
+                                    is_pro_flag = False
+                        if is_pro_flag:
+                            target_user_ids.append(uid)
+            else:
+                # Test mode: send to exempt users
+                target_user_ids = list(EXEMPT_USER_IDS)
 
             send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             async with httpx.AsyncClient(timeout=20) as http:
-                for user_id in EXEMPT_USER_IDS:
+                for uid in target_user_ids:
                     payload = {
-                        "chat_id": user_id,
+                        "chat_id": uid,
                         "text": message_text,
                         "reply_markup": keyboard,
                         "allow_sending_without_reply": True,
@@ -2056,9 +2212,9 @@ async def webhook(req: Request):
                         r.raise_for_status()
                         data = r.json()
                         if data.get("ok") and data.get("result"):
-                            daily_buttons_messages[user_id] = data["result"]["message_id"]
+                            daily_buttons_messages[uid] = data["result"]["message_id"]
                     except Exception as e:
-                        print(f"⚠ Failed to send daily buttons message to {user_id}: {e}")
+                        print(f"⚠ Failed to send daily buttons message to {uid}: {e}")
 
             return {"ok": True}
 
@@ -2126,13 +2282,12 @@ async def webhook(req: Request):
             elif data.startswith("var_"):
                 pending_selections[user_id]["variation"] = data.split("_")[1]
                 await update_style_selector(callback)
-            elif data == "generate":
-                # User confirmed - save preferences
+            elif data == "apply_prefs":
+                # User confirmed - save preferences only (no immediate generation)
                 # Safety check: Only allow pro users to save preferences (exempt users are NOT pro)
                 is_pro = is_pro_user(user_id) if user_id else False
                 if not is_pro:
-                    chat_id = callback["message"]["chat"]["id"]
-                    await telegram_send_message(chat_id, "⚠️ This feature is only available for Pro users.")
+                    # Silently ignore for non-pro users to avoid clutter.
                     return {"ok": True}
                 
                 selection = pending_selections[user_id]
@@ -2144,34 +2299,19 @@ async def webhook(req: Request):
                 )
                 
                 chat_id = selection["chat_id"]
-                user_text = selection["original_text"]
                 
-                # Delete the selection message
+                # Delete the style selector message to avoid clutter
                 message_id = callback["message"]["message_id"]
                 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
                 async with httpx.AsyncClient() as http:
                     await http.post(url, json={"chat_id": chat_id, "message_id": message_id})
                 
-                # Check if this was from /settings command (placeholder text)
-                if user_text == "📝 Send me the text you want to rephrase after choosing your style.":
-                    # Just confirm and wait for user to send actual text
-                    await telegram_send_message(chat_id, "✅ Preferences saved! Now send me the text you want to rephrase.")
-                    # Clean up and return
-                    del pending_selections[user_id]
-                    return {"ok": True}
-                
-                # Continue to rephrasing logic below by creating a synthetic message
-                message = {
-                    "from": callback["from"],
-                    "chat": callback["message"]["chat"],
-                    "text": user_text,
-                    "forward_origin": {"type": "user"},  # Fake forward to bypass check
-                    "_skip_style_selector": True,  # Flag to skip showing selector again
-                }
-                # Don't return, let it fall through to rephrasing logic
+                # Clear pending selection and stop; user can send/retry text manually.
+                del pending_selections[user_id]
+                return {"ok": True}
         # For style-selector callbacks that don't create a synthetic message,
         # we're done after handling the callback.
-        if not (data == "generate" or data.startswith("daily_post:")):
+        if not (data == "apply_prefs" or data.startswith("daily_post:")):
             return {"ok": True}
     else:
         message = update.get("message") or update.get("edited_message")
@@ -2420,22 +2560,32 @@ async def webhook(req: Request):
                 return {"ok": True}
     
     # Check rate limit (use from_user.id for user-specific limiting)
-    if user_id:
-        seconds_remaining = check_rate_limit(user_id)
-        if seconds_remaining is not None:
-            # Log rate limit hit
-            log_activity(
-                user_id=user_id,
-                action_type="rate_limited",
-                error_type="rate_limit",
-                error_message=f"Wait {seconds_remaining} seconds"
-            )
-            await telegram_send_message(
-                chat_id,
-                f"⏱️ Please wait {seconds_remaining} second{'s' if seconds_remaining != 1 else ''} before sending another message.\n\n"
-                f"Rate limit: 1 message per {RATE_LIMIT_SECONDS} seconds."
-            )
-            return {"ok": True}
+    # In global mode: exempt users skip all rate limits.
+    # In test mode: exempt users also get the 10s silent cooldown.
+    skip_rate_limit = is_exempt_user and DAILY_MODE == "global"
+    if user_id and not skip_rate_limit:
+        if is_pro or (is_exempt_user and DAILY_MODE != "global"):
+            # Pro users have a shorter, silent cooldown: 10 seconds.
+            last_time = user_last_request.get(user_id)
+            if last_time is not None and (time.time() - last_time) < 10:
+                # Within 10s window: silently drop request, no message/clutter.
+                return {"ok": True}
+        else:
+            seconds_remaining = check_rate_limit(user_id)
+            if seconds_remaining is not None:
+                # Log rate limit hit
+                log_activity(
+                    user_id=user_id,
+                    action_type="rate_limited",
+                    error_type="rate_limit",
+                    error_message=f"Wait {seconds_remaining} seconds"
+                )
+                await telegram_send_message(
+                    chat_id,
+                    f"⏱️ Please wait {seconds_remaining} second{'s' if seconds_remaining != 1 else ''} before sending another message.\n\n"
+                    f"Rate limit: 1 message per {RATE_LIMIT_SECONDS} seconds."
+                )
+                return {"ok": True}
     
     # Load user preferences for rephrasing - ONLY for pro users
     # Non-pro users (including exempt users) should not use saved preferences even if they exist in database
