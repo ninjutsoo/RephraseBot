@@ -2249,7 +2249,7 @@ async def webhook(req: Request):
                                     parse_mode="HTML",
                                 )
                             except Exception as e:
-                                print(f\"⚠ Failed to send daily message to {uid}: {e}\")
+                                print(f"⚠ Failed to send daily message to {uid}: {e}")
                 else:
                     # Test mode: we only have IDs (exempt users)
                     for uid in target_user_ids:
