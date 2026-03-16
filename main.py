@@ -1221,6 +1221,9 @@ async def handle_channel_post(message: dict) -> None:
         channel_daily_trigger_state.pop(key, None)
 
         # Build a short summary of today's tweets so approvers know what will be used.
+        # Show ALL saved tweets for the day, in the same order as the buttons:
+        # - If there is an X link and reply text, preview the reply text.
+        # - If there is only English text, preview that text.
         preview_lines: List[str] = []
         for idx, row in enumerate(rows, start=1):
             text_preview = (row.get("reply_text") or "").strip()
@@ -1229,9 +1232,6 @@ async def handle_channel_post(message: dict) -> None:
             words = text_preview.split()
             first_words = " ".join(words[:5])
             preview_lines.append(f'tweet {idx}: "{first_words}"')
-            if idx >= 10:
-                # Avoid overlong summaries; 10 is plenty for a quick review.
-                break
 
         previews_block = "\n".join(preview_lines) if preview_lines else "No preview text available."
         # Permission request keyboard
@@ -2037,17 +2037,28 @@ async def webhook(req: Request):
             )
 
             # TEST MODE: instead of sending to Pro users, send the daily buttons
-            # to all exempt users (EXEMPT_USER_IDS). Also remember their message
-            # IDs in daily_buttons_messages so we can clean them up on the next
+            # to all exempt users (EXEMPT_USER_IDS). Use raw sendMessage so we
+            # can record the exact message_id for reliable cleanup on the next
             # channel message after approval.
 
-            for user_id in EXEMPT_USER_IDS:
-                await telegram_send_message(user_id, message_text, reply_markup=keyboard)
-                # We don't have direct access to the Telegram message_id from
-                # telegram_send_message, so for test purposes we only track that
-                # a buttons message exists for this chat_id; actual deletion will
-                # rely on stored IDs when using low-level sendMessage paths.
-                # (Left here as a placeholder if we later switch this call to raw HTTP.)
+            send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            async with httpx.AsyncClient(timeout=20) as http:
+                for user_id in EXEMPT_USER_IDS:
+                    payload = {
+                        "chat_id": user_id,
+                        "text": message_text,
+                        "reply_markup": keyboard,
+                        "allow_sending_without_reply": True,
+                        "disable_web_page_preview": True,
+                    }
+                    try:
+                        r = await http.post(send_url, json=payload)
+                        r.raise_for_status()
+                        data = r.json()
+                        if data.get("ok") and data.get("result"):
+                            daily_buttons_messages[user_id] = data["result"]["message_id"]
+                    except Exception as e:
+                        print(f"⚠ Failed to send daily buttons message to {user_id}: {e}")
 
             return {"ok": True}
 
