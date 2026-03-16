@@ -1042,9 +1042,15 @@ def generate_tweet_summaries(rows: List[dict]) -> Dict[int, str]:
         return {}
 
     prompt = (
-        "Summarize each numbered tweet below in LESS THAN 10 WORDS. "
-        "Return ONLY the numbered summaries, one per line, matching the input numbering. "
-        "Do NOT exceed 10 words per summary. No preamble.\n\n"
+        "You are creating very short, topic-style labels for tweets.\n"
+        "For EACH numbered tweet below, write a concise summary that:\n"
+        "- Is SPECIFIC to that tweet's main idea (not generic).\n"
+        "- Uses STRICTLY LESS THAN 10 words (maximum 9 words).\n"
+        "- Does NOT copy the tweet verbatim; paraphrase the idea.\n"
+        "- Does NOT include hashtags, @handles, or quotes.\n"
+        "- Is returned in the format 'N. summary' on one line.\n"
+        "Return ONLY these numbered summaries, one per line, matching the input numbering.\n"
+        "No explanations, no extra text.\n\n"
         + "\n".join(numbered_tweets)
     )
 
@@ -1075,8 +1081,9 @@ def generate_tweet_summaries(rows: List[dict]) -> Dict[int, str]:
             idx = int(match.group(1))
             summary = match.group(2).strip().rstrip(".")
             words = summary.split()
-            if len(words) > 10:
-                summary = " ".join(words[:10])
+            # Enforce STRICTLY less than 10 words (max 9)
+            if len(words) >= 10:
+                summary = " ".join(words[:9])
             if 1 <= idx <= len(rows):
                 summaries[rows[idx - 1]["id"]] = summary
 
