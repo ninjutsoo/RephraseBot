@@ -1320,6 +1320,8 @@ async def handle_channel_post(message: dict) -> None:
                     row["summary"] = summaries[row["id"]]
 
         # Build preview using summaries (fall back to first 5 words of reply_text).
+        # Use the same 1️⃣,2️⃣,3️⃣... emoji style as the buttons.
+        num_emoji = ["", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
         preview_lines: List[str] = []
         for idx, row in enumerate(rows, start=1):
             summary = (row.get("summary") or "").strip()
@@ -1329,7 +1331,8 @@ async def handle_channel_post(message: dict) -> None:
                     continue
                 words = text_preview.split()
                 summary = " ".join(words[:5])
-            preview_lines.append(f'tweet {idx}: "{summary}"')
+            label = num_emoji[idx] if idx < len(num_emoji) else str(idx)
+            preview_lines.append(f'{label}: "{summary}"')
 
         previews_block = "\n".join(preview_lines) if preview_lines else "No preview text available."
         # Permission request keyboard
@@ -2133,6 +2136,8 @@ async def webhook(req: Request):
             keyboard = {"inline_keyboard": inline_keyboard}
 
             # Build summary lines for the buttons message
+            # Use the same 1️⃣,2️⃣,3️⃣... emoji style as the buttons.
+            num_emoji = ["", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
             summary_lines: List[str] = []
             for idx, row in enumerate(rows, start=1):
                 summary = (row.get("summary") or "").strip()
@@ -2140,14 +2145,16 @@ async def webhook(req: Request):
                     text_preview = (row.get("reply_text") or "").strip()
                     words = text_preview.split()
                     summary = " ".join(words[:5]) if words else "—"
-                summary_lines.append(f"{idx}. {summary}")
+                label = num_emoji[idx] if idx < len(num_emoji) else str(idx)
+                summary_lines.append(f"{label} {summary}")
 
             summaries_block = "\n".join(summary_lines)
 
             message_text = (
                 "Hi, you can now start tweeting.\n\n"
                 "These buttons represent today's posts from your channel.\n"
-                "Tap a button to get a rephrased reply for that post.\n\n"
+                "Tap a button to get a rephrased reply for that post.\n"
+                "⏱ Wait 10 seconds before tapping the next button.\n\n"
                 f"{summaries_block}"
             )
 
