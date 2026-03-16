@@ -980,9 +980,30 @@ def contains_arabic_script(text: str) -> bool:
 # the NEXT qualifying message is treated as the "last message" for that day.
 channel_daily_trigger_state: Dict[tuple, bool] = {}
 
+# In-memory per-day approval state for the daily channel flow.
+# Keyed by (channel_chat_id, day_est_iso). Once True, further approvals are ignored.
+daily_approval_state: Dict[Tuple[int, str], bool] = {}
+
+# In-memory map of approval request messages (for cleanup after first approval).
+# Maps (channel_chat_id, day_est_iso) -> list of {"chat_id": int, "message_id": int}
+daily_approval_messages: Dict[Tuple[int, str], List[Dict[str, int]]] = {}
+
+# In-memory map of "start tweeting" button messages sent to Pro users,
+# keyed by user chat_id so we can delete/rotate them on next day.
+daily_buttons_messages: Dict[int, int] = {}
+
 # In-memory map of "result message" IDs for the daily channel flow.
 # Keyed by chat_id so we can edit the same message instead of sending new ones.
 daily_result_messages: Dict[int, int] = {}
+
+# Track last processed EST day per channel so first message of a new day
+# can trigger cleanup of previous day's UI and DB rows.
+# NOTE: Disabled for test-mode cleanup based on "next message after approval".
+# channel_last_day_est: Dict[int, str] = {}
+
+# For test mode: track which channel/day needs cleanup on the *next* message
+# after approval (keyed by channel_chat_id -> day_est_iso).
+pending_daily_cleanup: Dict[int, str] = {}
 
 
 _TRIGGER_MARKER_RE = re.compile(r"([^\s/]+)/\1")
@@ -1034,6 +1055,70 @@ async def handle_channel_post(message: dict) -> None:
     dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
     dt_est = dt_utc.astimezone(EST)
     day_est = dt_est.date()
+    day_est_iso = day_est.isoformat()
+
+    # TEST MODE: if there's a pending daily cleanup for this channel,
+    # clean up previous day's UI (buttons/results) and DB rows on the
+    # *next* message after approval, regardless of day change.
+    cleanup_day_iso = pending_daily_cleanup.pop(chat_id, None)
+    if cleanup_day_iso:
+        prev_key = (chat_id, cleanup_day_iso)
+        # Clear approval state
+        daily_approval_state.pop(prev_key, None)
+
+        # Delete any outstanding approval messages for that previous day
+        messages = daily_approval_messages.pop(prev_key, [])
+        delete_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
+        async with httpx.AsyncClient(timeout=20) as http:
+            for msg in messages:
+                try:
+                    await http.post(
+                        delete_url,
+                        json={"chat_id": msg["chat_id"], "message_id": msg["message_id"]},
+                    )
+                except Exception as e:
+                    print(
+                        f"⚠ Failed to delete stale approval message {msg['chat_id']}/{msg['message_id']}: {e}"
+                    )
+
+        # Delete daily buttons and their associated result messages
+        async with httpx.AsyncClient(timeout=20) as http:
+            for user_chat_id, msg_id in list(daily_buttons_messages.items()):
+                try:
+                    await http.post(
+                        delete_url,
+                        json={"chat_id": user_chat_id, "message_id": msg_id},
+                    )
+                except Exception as e:
+                    print(
+                        f"⚠ Failed to delete daily buttons message {user_chat_id}/{msg_id}: {e}"
+                    )
+                # Also try to delete their last result message if present
+                result_id = daily_result_messages.get(user_chat_id)
+                if result_id:
+                    try:
+                        await http.post(
+                            delete_url,
+                            json={"chat_id": user_chat_id, "message_id": result_id},
+                        )
+                    except Exception as e:
+                        print(
+                            f"⚠ Failed to delete daily result message {user_chat_id}/{result_id}: {e}"
+                        )
+
+        daily_buttons_messages.clear()
+        daily_result_messages.clear()
+
+        # Clean previous day's DB rows for this channel
+        if supabase_client:
+            try:
+                supabase_client.table("daily_channel_posts").delete().eq(
+                    "channel_chat_id", chat_id
+                ).eq("day_est", cleanup_day_iso).execute()
+            except Exception as e:
+                print(
+                    f"⚠ Failed to delete previous day's daily_channel_posts for {chat_id} {cleanup_day_iso}: {e}"
+                )
 
     # Extract text or caption
     text = message.get("text") or message.get("caption") or ""
@@ -1043,7 +1128,7 @@ async def handle_channel_post(message: dict) -> None:
     # First, detect if this is the daily trigger marker (e.g. 8/8, 3/3, تب/تب).
     # If so, mark the channel/day as "armed" and do NOT save this message.
     if is_daily_trigger_message(text):
-        key = (chat_id, day_est.isoformat())
+        key = (chat_id, day_est_iso)
         channel_daily_trigger_state[key] = True
         print(f"✓ Daily trigger received for channel {chat_id} on {day_est}")
         return
@@ -1121,23 +1206,21 @@ async def handle_channel_post(message: dict) -> None:
         print(f"⚠ Failed to fetch daily_channel_posts for notification: {e}")
         return
 
+    # NOTE: channel_last_day_est-based cleanup is disabled in test mode.
+    # channel_last_day_est[chat_id] = day_est_iso
+
     # Only notify once we have at least 1 saved post for the day
     if not rows:
         return
     # If this channel/day is "armed" by a trigger message, this is the
-    # final tweet of the day. Ask the owner for permission before sending
-    # the main buttons message.
+    # final tweet of the day. Ask exempt users for permission before sending
+    # the main buttons message to Pro users.
     key = (chat_id, day_est.isoformat())
     if channel_daily_trigger_state.get(key):
         # Clear the armed state; we're done for this day/channel.
         channel_daily_trigger_state.pop(key, None)
 
-        target_user_id = 422339974
-
-        # Build a short summary of today's tweets so the admin knows what will be used.
-        # Example:
-        # tweet 1: "Good for Sweden The rest"
-        # tweet 2: "Another example of text"
+        # Build a short summary of today's tweets so approvers know what will be used.
         preview_lines: List[str] = []
         for idx, row in enumerate(rows, start=1):
             text_preview = (row.get("reply_text") or "").strip()
@@ -1169,7 +1252,34 @@ async def handle_channel_post(message: dict) -> None:
             f"{previews_block}\n\n"
             "Do you want to see them with rephrase buttons now?"
         )
-        await telegram_send_message(target_user_id, message_text, reply_markup=keyboard)
+
+        # Send approval request to all exempt users and remember their messages
+        approver_ids = list(EXEMPT_USER_IDS)
+        approval_key = (chat_id, day_est.isoformat())
+        daily_approval_messages.setdefault(approval_key, [])
+
+        if approver_ids:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            for approver_id in approver_ids:
+                payload = {
+                    "chat_id": approver_id,
+                    "text": message_text,
+                    "reply_markup": keyboard,
+                }
+                async with httpx.AsyncClient(timeout=20) as http:
+                    try:
+                        r = await http.post(url, json=payload)
+                        r.raise_for_status()
+                        data = r.json()
+                        if data.get("ok") and data.get("result"):
+                            daily_approval_messages[approval_key].append(
+                                {
+                                    "chat_id": approver_id,
+                                    "message_id": data["result"]["message_id"],
+                                }
+                            )
+                    except Exception as e:
+                        print(f"⚠ Failed to send approval request to {approver_id}: {e}")
 
 
 def has_forwarded_media(message: dict) -> bool:
@@ -1854,6 +1964,35 @@ async def webhook(req: Request):
             if not supabase_client:
                 return {"ok": True}
 
+            approval_key = (chan_id, day_str)
+
+            # If another approver already confirmed this day/channel, just clean up this message.
+            if daily_approval_state.get(approval_key):
+                chat_id = callback["message"]["chat"]["id"]
+                message_id = callback["message"]["message_id"]
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
+                async with httpx.AsyncClient(timeout=20) as http:
+                    try:
+                        await http.post(url, json={"chat_id": chat_id, "message_id": message_id})
+                    except Exception as e:
+                        print(f\"⚠ Failed to delete stale approval message {chat_id}/{message_id}: {e}\")
+                return {"ok": True}
+
+            # Mark this day/channel as approved (first approver wins) and
+            # schedule cleanup on the *next* message from this channel.
+            daily_approval_state[approval_key] = True
+            pending_daily_cleanup[chan_id] = day_str
+
+            # Clean up all outstanding approval messages for this day/channel, including this one.
+            messages = daily_approval_messages.pop(approval_key, [])
+            delete_url = f\"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage\"
+            async with httpx.AsyncClient(timeout=20) as http:
+                for msg in messages:
+                    try:
+                        await http.post(delete_url, json={\"chat_id\": msg[\"chat_id\"], \"message_id\": msg[\"message_id\"]})
+                    except Exception as e:
+                        print(f\"⚠ Failed to delete approval message {msg['chat_id']}/{msg['message_id']}: {e}\")
+
             try:
                 day_rows = (
                     supabase_client.table("daily_channel_posts")
@@ -1891,14 +2030,25 @@ async def webhook(req: Request):
 
             keyboard = {"inline_keyboard": inline_keyboard}
 
-            target_user_id = 422339974
             message_text = (
                 "Hi, you can now start tweeting.\n\n"
                 "These buttons represent today's posts from your test channel.\n"
                 "Tap a button to get a rephrased reply for that post."
             )
 
-            await telegram_send_message(target_user_id, message_text, reply_markup=keyboard)
+            # TEST MODE: instead of sending to Pro users, send the daily buttons
+            # to all exempt users (EXEMPT_USER_IDS). Also remember their message
+            # IDs in daily_buttons_messages so we can clean them up on the next
+            # channel message after approval.
+
+            for user_id in EXEMPT_USER_IDS:
+                await telegram_send_message(user_id, message_text, reply_markup=keyboard)
+                # We don't have direct access to the Telegram message_id from
+                # telegram_send_message, so for test purposes we only track that
+                # a buttons message exists for this chat_id; actual deletion will
+                # rely on stored IDs when using low-level sendMessage paths.
+                # (Left here as a placeholder if we later switch this call to raw HTTP.)
+
             return {"ok": True}
 
         if data.startswith("daily_post:"):
@@ -2206,6 +2356,21 @@ async def webhook(req: Request):
     
     print(f"DEBUG: user_id={user_id}, is_exempt={is_exempt_user}, is_pro={is_pro}, has_saved_prefs={has_saved_prefs}, skip_selector={skip_selector}")
     
+    # Pro users should NOT forward messages to the bot anymore (to avoid clutter).
+    # They should use the daily buttons or plain text instead.
+    # Synthetic messages from the daily channel flow bypass this check.
+    if is_pro and not message.get("_from_daily_channel") and is_forwarded(message):
+        # Silently delete the forwarded message and do nothing else.
+        msg_id = message.get("message_id")
+        if msg_id is not None:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
+            async with httpx.AsyncClient(timeout=20) as http:
+                try:
+                    await http.post(url, json={"chat_id": chat_id, "message_id": msg_id})
+                except Exception as e:
+                    print(f"⚠ Failed to delete forwarded message from Pro user {user_id}: {e}")
+        return {"ok": True}
+
     # Show selector ONLY for first-time Pro users (no saved preferences yet)
     if is_pro and user_id not in pending_selections and not skip_selector and not has_saved_prefs:
         print(f"DEBUG: First-time user - showing style selector for user {user_id}")
