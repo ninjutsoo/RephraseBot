@@ -1359,7 +1359,7 @@ async def handle_channel_post(message: dict) -> None:
             ]
         }
         message_text = (
-            "Today's tweets from your channel are ready.\n\n"
+            "Today's tweets from the channel are ready.\n\n"
             "Preview:\n"
             f"{previews_block}\n\n"
             "Do you want to see them with rephrase buttons now?"
@@ -2163,7 +2163,7 @@ async def webhook(req: Request):
 
             message_text = (
                 "Hi, you can now start tweeting.\n\n"
-                "These buttons represent today's posts from your channel.\n"
+                "These buttons represent today's posts from the channel.\n"
                 "Tap a button to get a rephrased reply for that post.\n"
                 "⏱ Wait 10 seconds before tapping the next button.\n\n"
                 f"{summaries_block}"
@@ -2172,12 +2172,13 @@ async def webhook(req: Request):
             # Determine target users based on mode
             target_user_ids: List[int] = []
 
+            users: List[dict] = []
             if DAILY_MODE == "global":
                 # Send to active Pro users
                 if supabase_client:
                     try:
                         result = supabase_client.table("users").select(
-                            "user_id, is_pro, pro_expires_at, trial_ends_at"
+                            "user_id, is_pro, pro_expires_at, trial_ends_at, has_daily_message, daily_message"
                         ).execute()
                         users = result.data or []
                     except Exception as e:
@@ -2217,22 +2218,66 @@ async def webhook(req: Request):
 
             send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             async with httpx.AsyncClient(timeout=20) as http:
-                for uid in target_user_ids:
-                    payload = {
-                        "chat_id": uid,
-                        "text": message_text,
-                        "reply_markup": keyboard,
-                        "allow_sending_without_reply": True,
-                        "disable_web_page_preview": True,
-                    }
-                    try:
-                        r = await http.post(send_url, json=payload)
-                        r.raise_for_status()
-                        data = r.json()
-                        if data.get("ok") and data.get("result"):
-                            daily_buttons_messages[uid] = data["result"]["message_id"]
-                    except Exception as e:
-                        print(f"⚠ Failed to send daily buttons message to {uid}: {e}")
+                # In global mode, we have user records; in test mode, we only have IDs.
+                if DAILY_MODE == "global" and users:
+                    user_by_id = {u.get("user_id"): u for u in users if u.get("user_id")}
+                    for uid in target_user_ids:
+                        payload = {
+                            "chat_id": uid,
+                            "text": message_text,
+                            "reply_markup": keyboard,
+                            "allow_sending_without_reply": True,
+                            "disable_web_page_preview": True,
+                        }
+                        try:
+                            r = await http.post(send_url, json=payload)
+                            r.raise_for_status()
+                            data = r.json()
+                            if data.get("ok") and data.get("result"):
+                                daily_buttons_messages[uid] = data["result"]["message_id"]
+                        except Exception as e:
+                            print(f"⚠ Failed to send daily buttons message to {uid}: {e}")
+
+                        # One-time/broadcast daily message mechanism for global-mode users.
+                        # If has_daily_message is true and daily_message is set, send it now.
+                        user = user_by_id.get(uid) or {}
+                        if user.get("has_daily_message") and (user.get("daily_message") or "").strip():
+                            try:
+                                await telegram_send_message(
+                                    uid,
+                                    user["daily_message"],
+                                    parse_mode="HTML",
+                                )
+                            except Exception as e:
+                                print(f\"⚠ Failed to send daily message to {uid}: {e}\")
+                else:
+                    # Test mode: we only have IDs (exempt users)
+                    for uid in target_user_ids:
+                        payload = {
+                            "chat_id": uid,
+                            "text": message_text,
+                            "reply_markup": keyboard,
+                            "allow_sending_without_reply": True,
+                            "disable_web_page_preview": True,
+                        }
+                        try:
+                            r = await http.post(send_url, json=payload)
+                            r.raise_for_status()
+                            data = r.json()
+                            if data.get("ok") and data.get("result"):
+                                daily_buttons_messages[uid] = data["result"]["message_id"]
+                        except Exception as e:
+                            print(f"⚠ Failed to send daily buttons message to {uid}: {e}")
+
+            # After sending daily buttons, if there is an active global daily message,
+            # clear it for all users so it is only sent once.
+            if DAILY_MODE == "global" and supabase_client:
+                try:
+                    supabase_client.table("users").update(
+                        {"has_daily_message": False, "daily_message": None}
+                    ).eq("has_daily_message", True).execute()
+                except Exception as e:
+                    print(f"⚠ Failed to clear has_daily_message flags: {e}")
 
             return {"ok": True}
 
