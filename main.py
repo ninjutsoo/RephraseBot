@@ -13,7 +13,7 @@ from collections import Counter, deque, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from math import sqrt
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -1005,6 +1005,9 @@ daily_buttons_messages: Dict[int, int] = {}
 # Keyed by chat_id so we can edit the same message instead of sending new ones.
 daily_result_messages: Dict[int, int] = {}
 
+# Track which users have already received the Pro start keyboard/message
+pro_start_sent: Set[int] = set()
+
 # Track last processed EST day per channel so first message of a new day
 # can trigger cleanup of previous day's UI and DB rows. (global mode)
 channel_last_day_est: Dict[int, str] = {}
@@ -1545,6 +1548,56 @@ async def telegram_send_message(chat_id: int, text: str, reply_markup: Optional[
             
             # Re-raise - we need to know about these
             raise
+
+
+async def send_start_message(chat_id: int, user_id: Optional[int], is_exempt_user: bool) -> None:
+    """
+    Centralized handler for the /start UI so we can reuse the same
+    Pro / exempt / normal behavior from multiple entry points.
+    """
+    is_pro = is_pro_user(user_id) if user_id else False
+
+    if is_pro:
+        # Show persistent keyboard with Settings button for Pro users
+        keyboard = {
+            "keyboard": [
+                [{"text": "⚙️ Settings"}]
+            ],
+            "resize_keyboard": True,
+            "is_persistent": True,
+        }
+        await telegram_send_message(
+            chat_id,
+            "🤖 <b>RephraseBot</b>\n\n"
+            "Send me any text and I'll rephrase it for you!\n\n"
+            "💎 <b>Pro Features:</b>\n"
+            "• Custom style preferences (tone, length, variation)\n"
+            "• Tap the <b>⚙️ Settings</b> button below to change preferences",
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+        return
+
+    if is_exempt_user:
+        # Exception users: show Weekly report button only
+        keyboard = {
+            "keyboard": [
+                [{"text": "📊 Weekly report"}],
+            ],
+            "resize_keyboard": True,
+            "is_persistent": True,
+        }
+        await telegram_send_message(
+            chat_id,
+            "🤖 <b>RephraseBot</b>\n\n"
+            "Send me any text and I'll rephrase it.\n\n"
+            "📊 <b>Weekly report</b> – last 7 days (new / active users).",
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+        return
+
+    await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
 
 
 async def show_style_selector(chat_id: int, user_id: int, original_text: str) -> None:
@@ -2417,42 +2470,8 @@ async def webhook(req: Request):
         # Log /start command
         if user_id:
             log_activity(user_id=user_id, action_type="command_start")
-        
-        is_pro = is_pro_user(user_id) if user_id else False
-        if is_pro:
-            # Show persistent keyboard with Settings button for Pro users
-            keyboard = {
-                "keyboard": [
-                    [{"text": "⚙️ Settings"}]
-                ],
-                "resize_keyboard": True,
-                "is_persistent": True
-            }
-            await telegram_send_message(chat_id, 
-                "🤖 <b>RephraseBot</b>\n\n"
-                "Send me any text and I'll rephrase it for you!\n\n"
-                "💎 <b>Pro Features:</b>\n"
-                "• Custom style preferences (tone, length, variation)\n"
-                "• Tap the <b>⚙️ Settings</b> button below to change preferences",
-                reply_markup=keyboard,
-                parse_mode="HTML")
-        elif is_exempt_user:
-            # Exception users: show Weekly report button only
-            keyboard = {
-                "keyboard": [
-                    [{"text": "📊 Weekly report"}],
-                ],
-                "resize_keyboard": True,
-                "is_persistent": True,
-            }
-            await telegram_send_message(
-                chat_id,
-                "🤖 <b>RephraseBot</b>\n\nSend me any text and I'll rephrase it.\n\n📊 <b>Weekly report</b> – last 7 days (new / active users).",
-                reply_markup=keyboard,
-                parse_mode="HTML",
-            )
-        else:
-            await telegram_send_message(chat_id, "Bot is running. Send any message to rephrase it.")
+
+        await send_start_message(chat_id, user_id, is_exempt_user)
         return {"ok": True}
     
     # /settings or /preferences command - show style selector for exempt/Pro users
@@ -2567,6 +2586,19 @@ async def webhook(req: Request):
     if is_pro and user_id:
         prefs = get_user_preferences(user_id)
         has_saved_prefs = prefs is not None and any([prefs.get("tone"), prefs.get("length"), prefs.get("variation")])
+
+    # Auto-onboard only first-time Pro users who likely never saw the Pro keyboard.
+    # Existing Pro users with saved preferences are left untouched to avoid spamming them.
+    if (
+        user_id
+        and is_pro
+        and not has_saved_prefs
+        and not is_exempt_user
+        and not message.get("_from_daily_channel")
+        and user_id not in pro_start_sent
+    ):
+        pro_start_sent.add(user_id)
+        await send_start_message(chat_id, user_id, is_exempt_user=False)
     
     print(f"DEBUG: user_id={user_id}, is_exempt={is_exempt_user}, is_pro={is_pro}, has_saved_prefs={has_saved_prefs}, skip_selector={skip_selector}")
     
