@@ -187,14 +187,14 @@ ALLOWED_FORWARD_CHANNEL = os.environ.get("ALLOWED_FORWARD_CHANNEL")
 # Can be channel username (e.g., "mychannel") or channel ID (e.g., "-1001234567890")
 TEST_CHANNEL = os.environ.get("TEST_CHANNEL")
 
-# Mode control (Render env var): MODE=GENERAL or MODE=TEST
-# Map to internal daily mode: "global" or "test"
-MODE = (os.environ.get("MODE", "GENERAL") or "GENERAL").strip().upper()
+# Mode control (Render env var): MODE=GLOBAL or MODE=TEST
+# Internal daily mode: "global" or "test"
+MODE = (os.environ.get("MODE", "GLOBAL") or "GLOBAL").strip().upper()
 
 # Daily flow mode: "global" or "test"
 # global: listens to ALLOWED_FORWARD_CHANNEL, sends buttons to Pro users, cleanup on next EST day
 # test:   listens to TEST_CHANNEL, sends buttons to exempt users, cleanup on next channel post after buttons sent
-DAILY_MODE = "global" if MODE == "GENERAL" else "test"
+DAILY_MODE = "global" if MODE == "GLOBAL" else "test"
 
 # Rate limiting: seconds a user must wait between requests
 # Set to 0 to disable rate limiting
