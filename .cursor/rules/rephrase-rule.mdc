@@ -19,6 +19,12 @@ When you make a mistake or the user gives feedback that reveals a better rule: a
 
 ---
 
+# String and syntax safety
+
+- **When editing strings or f-strings in Python, never leave JSON-style escaped quotes (like `\"`) or unbalanced quotes/backslashes in the source; always use valid Python string literals and fix any syntax error immediately before committing or deploying.**
+
+---
+
 # Testing and cleanup
 
 - **Run tests yourself**; don’t ask the user to run commands.

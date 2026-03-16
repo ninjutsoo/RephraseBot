@@ -1975,7 +1975,7 @@ async def webhook(req: Request):
                     try:
                         await http.post(url, json={"chat_id": chat_id, "message_id": message_id})
                     except Exception as e:
-                        print(f\"⚠ Failed to delete stale approval message {chat_id}/{message_id}: {e}\")
+                        print(f"⚠ Failed to delete stale approval message {chat_id}/{message_id}: {e}")
                 return {"ok": True}
 
             # Mark this day/channel as approved (first approver wins) and
@@ -1985,13 +1985,13 @@ async def webhook(req: Request):
 
             # Clean up all outstanding approval messages for this day/channel, including this one.
             messages = daily_approval_messages.pop(approval_key, [])
-            delete_url = f\"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage\"
+            delete_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
             async with httpx.AsyncClient(timeout=20) as http:
                 for msg in messages:
                     try:
-                        await http.post(delete_url, json={\"chat_id\": msg[\"chat_id\"], \"message_id\": msg[\"message_id\"]})
+                        await http.post(delete_url, json={"chat_id": msg["chat_id"], "message_id": msg["message_id"]})
                     except Exception as e:
-                        print(f\"⚠ Failed to delete approval message {msg['chat_id']}/{msg['message_id']}: {e}\")
+                        print(f"⚠ Failed to delete approval message {msg['chat_id']}/{msg['message_id']}: {e}")
 
             try:
                 day_rows = (
