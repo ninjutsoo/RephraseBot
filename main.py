@@ -2663,8 +2663,9 @@ async def webhook(req: Request):
                 print(f"DEBUG: Adding Post on X button for text-only rephrase ({len(clean_text)} chars)")
 
         # For daily channel posts, reuse a single result message per chat by editing it.
-        # Prefer the callback message id (the message with the number buttons) so we edit
-        # that same message even after bot restart; fall back to in-memory cache for session.
+        # IMPORTANT: Never edit the original buttons message; instead, keep it intact
+        # and edit a separate "result" message that appears below it. We track that
+        # result message in daily_result_messages[chat_id].
         if message.get("_from_daily_channel"):
             send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             edit_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
@@ -2678,7 +2679,9 @@ async def webhook(req: Request):
             if reply_markup:
                 payload["reply_markup"] = reply_markup
 
-            existing_id = message.get("_callback_message_id") or daily_result_messages.get(chat_id)
+            # Only ever edit the dedicated result message for this chat, never the
+            # original buttons message. If none exists yet, we'll send one below.
+            existing_id = daily_result_messages.get(chat_id)
             if existing_id:
                 edit_payload = {
                     "chat_id": chat_id,
