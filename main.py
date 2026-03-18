@@ -984,10 +984,10 @@ def contains_arabic_script(text: str) -> bool:
     return bool(_ARABIC_SCRIPT_RE.search(text or ""))
 
 
-# In-memory per-day trigger state for channels:
-# when a "x/x" marker message is seen (e.g. 8/8, 3/3, تب/تب),
-# the NEXT qualifying message is treated as the "last message" for that day.
-channel_daily_trigger_state: Dict[tuple, bool] = {}
+# In-memory per-day expected tweet counts for channels.
+# When the first "x/y" marker message is seen (e.g. 1/8, 7/19),
+# the RIGHT-hand number (y) is treated as the total expected tweets for that day.
+daily_expected_counts: Dict[Tuple[int, str], int] = {}
 
 # In-memory per-day approval state for the daily channel flow.
 # Keyed by (channel_chat_id, day_est_iso). Once True, further approvals are ignored.
@@ -1017,18 +1017,164 @@ channel_last_day_est: Dict[int, str] = {}
 pending_daily_cleanup: Dict[int, str] = {}
 
 
-_TRIGGER_MARKER_RE = re.compile(r"([^\s/]+)/\1")
+def persist_daily_expected_total(channel_chat_id: int, day_est_iso: str, expected_total: int) -> None:
+    """
+    Persist the expected daily total (y from x/y) so it's not lost on restarts.
+    Requires Supabase table: daily_expected_totals(channel_chat_id bigint, day_est date, expected_total int).
+    """
+    if not supabase_client:
+        return
+    if expected_total <= 0:
+        return
+    try:
+        # Prefer upsert if supported by the client version.
+        try:
+            supabase_client.table("daily_expected_totals").upsert(
+                {
+                    "channel_chat_id": channel_chat_id,
+                    "day_est": day_est_iso,
+                    "expected_total": expected_total,
+                },
+                on_conflict="channel_chat_id,day_est",
+            ).execute()
+            return
+        except Exception:
+            pass
+
+        # Fallback: update then insert (works even if upsert isn't available).
+        updated = (
+            supabase_client.table("daily_expected_totals")
+            .update({"expected_total": expected_total})
+            .eq("channel_chat_id", channel_chat_id)
+            .eq("day_est", day_est_iso)
+            .execute()
+        )
+        if (updated.data or []) or (getattr(updated, "count", 0) or 0) > 0:
+            return
+
+        supabase_client.table("daily_expected_totals").insert(
+            {
+                "channel_chat_id": channel_chat_id,
+                "day_est": day_est_iso,
+                "expected_total": expected_total,
+            }
+        ).execute()
+    except Exception as e:
+        print(
+            f"⚠ Failed to persist daily expected total for {channel_chat_id} {day_est_iso}: {e}"
+        )
 
 
-def is_daily_trigger_message(text: str) -> bool:
+def load_persisted_daily_expected_total(channel_chat_id: int, day_est_iso: str) -> Optional[int]:
+    """Load persisted expected_total for (channel, day) from Supabase if present."""
+    if not supabase_client:
+        return None
+    try:
+        result = (
+            supabase_client.table("daily_expected_totals")
+            .select("expected_total")
+            .eq("channel_chat_id", channel_chat_id)
+            .eq("day_est", day_est_iso)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        if not rows:
+            return None
+        val = rows[0].get("expected_total")
+        if val is None:
+            return None
+        try:
+            return int(val)
+        except Exception:
+            return None
+    except Exception:
+        # Table may not exist yet or query failed; treat as missing.
+        return None
+
+
+def delete_persisted_daily_expected_total(channel_chat_id: int, day_est_iso: str) -> None:
+    """Delete persisted expected_total for (channel, day) from Supabase."""
+    if not supabase_client:
+        return
+    try:
+        supabase_client.table("daily_expected_totals").delete().eq(
+            "channel_chat_id", channel_chat_id
+        ).eq("day_est", day_est_iso).execute()
+    except Exception:
+        # Ignore if table doesn't exist / already gone.
+        return
+
+
+async def cleanup_daily_for_channel_day(chat_id: int, cleanup_day_iso: str) -> None:
     """
-    Return True if text contains a marker of the form X/X where the two
-    sides are identical (e.g. 3/3, 10/10, تب/تب).
-    Used to mark that the NEXT message is the final tweet for the day.
+    Cleanup helper for a completed previous day for a given channel.
+    - Clears approval/expected-count state for that (channel, day)
+    - Deletes any outstanding approval messages
+    - Deletes Pro users' daily buttons and their last result message
+    - Deletes that day's rows from daily_channel_posts for the channel
+    This is now triggered by the first x/y marker of the *new* day.
     """
-    if not text:
-        return False
-    return bool(_TRIGGER_MARKER_RE.search(text))
+    prev_key = (chat_id, cleanup_day_iso)
+
+    # Clear approval + expected-count state
+    daily_approval_state.pop(prev_key, None)
+    daily_expected_counts.pop(prev_key, None)
+    delete_persisted_daily_expected_total(chat_id, cleanup_day_iso)
+
+    # Delete any outstanding approval messages for that previous day
+    messages = daily_approval_messages.pop(prev_key, [])
+    delete_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
+
+    async with httpx.AsyncClient(timeout=20) as http:
+        for msg in messages:
+            try:
+                await http.post(
+                    delete_url,
+                    json={"chat_id": msg["chat_id"], "message_id": msg["message_id"]},
+                )
+            except Exception as e:
+                print(
+                    f"⚠ Failed to delete stale approval message {msg['chat_id']}/{msg['message_id']}: {e}"
+                )
+
+        # Delete Pro users' daily buttons and their associated result messages
+        for user_chat_id, msg_id in list(daily_buttons_messages.items()):
+            try:
+                await http.post(
+                    delete_url,
+                    json={"chat_id": user_chat_id, "message_id": msg_id},
+                )
+            except Exception as e:
+                print(
+                    f"⚠ Failed to delete daily buttons message {user_chat_id}/{msg_id}: {e}"
+                )
+            # Also try to delete their last result message if present
+            result_id = daily_result_messages.get(user_chat_id)
+            if result_id:
+                try:
+                    await http.post(
+                        delete_url,
+                        json={"chat_id": user_chat_id, "message_id": result_id},
+                    )
+                except Exception as e:
+                    print(
+                        f"⚠ Failed to delete daily result message {user_chat_id}/{result_id}: {e}"
+                    )
+
+    daily_buttons_messages.clear()
+    daily_result_messages.clear()
+
+    # Clean previous day's DB rows for this channel
+    if supabase_client:
+        try:
+            supabase_client.table("daily_channel_posts").delete().eq(
+                "channel_chat_id", chat_id
+            ).eq("day_est", cleanup_day_iso).execute()
+        except Exception as e:
+            print(
+                f"⚠ Failed to delete previous day's daily_channel_posts for {chat_id} {cleanup_day_iso}: {e}"
+            )
 
 
 def generate_tweet_summaries(rows: List[dict]) -> Dict[int, str]:
@@ -1139,93 +1285,39 @@ async def handle_channel_post(message: dict) -> None:
     day_est = dt_est.date()
     day_est_iso = day_est.isoformat()
 
-    # Determine if cleanup is needed based on mode:
-    # global: first message of a new EST day triggers cleanup of previous day
-    # test:   next message after buttons were sent triggers cleanup
-    needs_cleanup = False
-    cleanup_day_iso = None
-
-    if DAILY_MODE == "global":
-        last_day_iso = channel_last_day_est.get(chat_id)
-        if last_day_iso and last_day_iso != day_est_iso:
-            needs_cleanup = True
-            cleanup_day_iso = last_day_iso
-    else:
-        cleanup_day_iso = pending_daily_cleanup.pop(chat_id, None)
-        if cleanup_day_iso:
-            needs_cleanup = True
-
-    if needs_cleanup and cleanup_day_iso:
-        prev_key = (chat_id, cleanup_day_iso)
-        # Clear approval state
-        daily_approval_state.pop(prev_key, None)
-
-        # Delete any outstanding approval messages for that previous day
-        messages = daily_approval_messages.pop(prev_key, [])
-        delete_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
-        async with httpx.AsyncClient(timeout=20) as http:
-            for msg in messages:
-                try:
-                    await http.post(
-                        delete_url,
-                        json={"chat_id": msg["chat_id"], "message_id": msg["message_id"]},
-                    )
-                except Exception as e:
-                    print(
-                        f"⚠ Failed to delete stale approval message {msg['chat_id']}/{msg['message_id']}: {e}"
-                    )
-
-        # Delete Pro users' daily buttons and their associated result messages
-        async with httpx.AsyncClient(timeout=20) as http:
-            for user_chat_id, msg_id in list(daily_buttons_messages.items()):
-                try:
-                    await http.post(
-                        delete_url,
-                        json={"chat_id": user_chat_id, "message_id": msg_id},
-                    )
-                except Exception as e:
-                    print(
-                        f"⚠ Failed to delete daily buttons message {user_chat_id}/{msg_id}: {e}"
-                    )
-                # Also try to delete their last result message if present
-                result_id = daily_result_messages.get(user_chat_id)
-                if result_id:
-                    try:
-                        await http.post(
-                            delete_url,
-                            json={"chat_id": user_chat_id, "message_id": result_id},
-                        )
-                    except Exception as e:
-                        print(
-                            f"⚠ Failed to delete daily result message {user_chat_id}/{result_id}: {e}"
-                        )
-
-        daily_buttons_messages.clear()
-        daily_result_messages.clear()
-
-        # Clean previous day's DB rows for this channel
-        if supabase_client:
-            try:
-                supabase_client.table("daily_channel_posts").delete().eq(
-                    "channel_chat_id", chat_id
-                ).eq("day_est", cleanup_day_iso).execute()
-            except Exception as e:
-                print(
-                    f"⚠ Failed to delete previous day's daily_channel_posts for {chat_id} {cleanup_day_iso}: {e}"
-                )
-
     # Extract text or caption
     text = message.get("text") or message.get("caption") or ""
     if not text.strip():
         return
 
-    # First, detect if this is the daily trigger marker (e.g. 8/8, 3/3, تب/تب).
-    # If so, mark the channel/day as "armed" and do NOT save this message.
-    if is_daily_trigger_message(text):
-        key = (chat_id, day_est_iso)
-        channel_daily_trigger_state[key] = True
-        print(f"✓ Daily trigger received for channel {chat_id} on {day_est}")
-        return
+    # Detect first "x/y" marker of the day to set expected tweet count
+    # AND trigger cleanup for the previous day (if any) for this channel.
+    # Example: "توییت 1/8" or "Tweet 7/19". We consider the RIGHT-hand number (y)
+    # as the total number of tweets expected for this (channel, day).
+    marker_key = (chat_id, day_est_iso)
+    if marker_key not in daily_expected_counts:
+        # \d matches both Western and Arabic-Indic digits.
+        marker_match = re.search(r"(\d+)\s*/\s*(\d+)", text)
+        if marker_match:
+            try:
+                total_for_day = int(marker_match.group(2))
+            except Exception:
+                total_for_day = 0
+            if total_for_day > 0:
+                # If we have a previous processed day for this channel and it's
+                # different from today's day, cleanup that previous day first.
+                last_day_iso = channel_last_day_est.get(chat_id)
+                if last_day_iso and last_day_iso != day_est_iso:
+                    await cleanup_daily_for_channel_day(chat_id, last_day_iso)
+
+                daily_expected_counts[marker_key] = total_for_day
+                persist_daily_expected_total(chat_id, day_est_iso, total_for_day)
+                channel_last_day_est[chat_id] = day_est_iso
+                print(
+                    f"✓ Daily total set for channel {chat_id} on {day_est_iso}: {total_for_day} tweets expected"
+                )
+                # Marker messages themselves are not saved as daily posts.
+                return
 
     # Detect X/Twitter link and strip it for language validation / reply text
     tweet_id = extract_tweet_id(text)
@@ -1245,6 +1337,25 @@ async def handle_channel_post(message: dict) -> None:
     if not cleaned_text.strip():
         # Nothing meaningful to save
         return
+
+    # Deduplicate by tweet_url: if this X link was already saved today for this channel, skip.
+    if tweet_url and supabase_client:
+        try:
+            dup_check = (
+                supabase_client.table("daily_channel_posts")
+                .select("id", count="exact")
+                .eq("channel_chat_id", chat_id)
+                .eq("day_est", day_est.isoformat())
+                .eq("tweet_url", tweet_url)
+                .limit(0)
+                .execute()
+            )
+            if (dup_check.count or 0) > 0:
+                print(f"DEBUG: Skipping duplicate daily channel post for {chat_id} on {day_est_iso} (tweet_url={tweet_url})")
+                return
+        except Exception as e:
+            print(f"⚠ Failed to check duplicate daily_channel_posts for channel {chat_id}: {e}")
+            return
 
     # Compute day_index = 1 + existing posts for this channel/day
     try:
@@ -1304,97 +1415,122 @@ async def handle_channel_post(message: dict) -> None:
         print(f"⚠ Failed to fetch daily_channel_posts for notification: {e}")
         return
 
-    # Remember last processed day for this channel (for next-day cleanup trigger)
+    # Remember last processed day for this channel
     channel_last_day_est[chat_id] = day_est_iso
 
-    # Only notify once we have at least 1 saved post for the day
+    # Only continue once we have at least 1 saved post for the day
     if not rows:
         return
-    # If this channel/day is "armed" by a trigger message, this is the
-    # final tweet of the day. Generate Gemini summaries for all tweets,
-    # save them to DB, then ask exempt users for approval.
-    key = (chat_id, day_est.isoformat())
-    if channel_daily_trigger_state.get(key):
-        # Clear the armed state; we're done for this day/channel.
-        channel_daily_trigger_state.pop(key, None)
 
-        # Generate <10-word summaries for all tweets via Gemini and persist them.
-        summaries = generate_tweet_summaries(rows)
-        if summaries:
-            for row_id, summary_text in summaries.items():
-                try:
-                    supabase_client.table("daily_channel_posts").update(
-                        {"summary": summary_text}
-                    ).eq("id", row_id).execute()
-                except Exception as e:
-                    print(f"⚠ Failed to save summary for row {row_id}: {e}")
-            # Update in-memory rows so the preview uses summaries right away.
-            for row in rows:
-                if row["id"] in summaries:
-                    row["summary"] = summaries[row["id"]]
+    # New trigger rule:
+    # - First marker "x/y" of the day sets daily_expected_counts[(channel, day)] = y.
+    # - Once we have at least y distinct tweets (by tweet_url) saved for that day,
+    #   we generate summaries and trigger the daily flow.
+    day_key = (chat_id, day_est_iso)
+    expected_total = daily_expected_counts.get(day_key)
+    if not expected_total:
+        # Try loading it from Supabase (survives restarts).
+        persisted = load_persisted_daily_expected_total(chat_id, day_est_iso)
+        if persisted and persisted > 0:
+            daily_expected_counts[day_key] = persisted
+            expected_total = persisted
+        else:
+            # No marker seen yet for this day/channel; do nothing.
+            return
 
-        # Build preview using summaries (fall back to first 5 words of reply_text).
-        # Use the same 1️⃣,2️⃣,3️⃣... emoji style as the buttons.
-        num_emoji = ["", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        preview_lines: List[str] = []
-        for idx, row in enumerate(rows, start=1):
-            summary = (row.get("summary") or "").strip()
-            if not summary:
-                text_preview = (row.get("reply_text") or "").strip()
-                if not text_preview:
-                    continue
-                words = text_preview.split()
-                summary = " ".join(words[:5])
-            label = num_emoji[idx] if idx < len(num_emoji) else str(idx)
-            preview_lines.append(f'{label}: "{summary}"')
+    # Count how many distinct tweets we have with a tweet_url for this day.
+    # (Assumes each channel post-of-interest has an X/Twitter link.)
+    distinct_with_url = [row for row in rows if (row.get("tweet_url") or "").strip()]
+    current_count = len(distinct_with_url)
 
-        previews_block = "\n".join(preview_lines) if preview_lines else "No preview text available."
-        # Permission request keyboard
-        confirm_data = f"daily_confirm:{chat_id}:{day_est.isoformat()}"
-        keyboard = {
-            "inline_keyboard": [
-                [
-                    {
-                        "text": "✅ Yes, show today's tweets",
-                        "callback_data": confirm_data,
-                    }
-                ]
-            ]
-        }
-        message_text = (
-            "Today's tweets from the channel are ready.\n\n"
-            "Preview:\n"
-            f"{previews_block}\n\n"
-            "Do you want to see them with rephrase buttons now?"
+    if current_count < expected_total:
+        # Not enough tweets collected yet; wait for more.
+        print(
+            f"DEBUG: Daily tweets not complete for channel {chat_id} on {day_est_iso}: "
+            f"{current_count}/{expected_total} collected"
         )
+        return
 
-        # Send approval request to all exempt users and remember their messages
-        approver_ids = list(EXEMPT_USER_IDS)
-        approval_key = (chat_id, day_est.isoformat())
-        daily_approval_messages.setdefault(approval_key, [])
+    print(
+        f"✓ Daily tweets complete for channel {chat_id} on {day_est_iso}: "
+        f"{current_count}/{expected_total} collected"
+    )
 
-        if approver_ids:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            for approver_id in approver_ids:
-                payload = {
-                    "chat_id": approver_id,
-                    "text": message_text,
-                    "reply_markup": keyboard,
+    # Generate <10-word summaries for all tweets via Gemini and persist them.
+    summaries = generate_tweet_summaries(rows)
+    if summaries:
+        for row_id, summary_text in summaries.items():
+            try:
+                supabase_client.table("daily_channel_posts").update(
+                    {"summary": summary_text}
+                ).eq("id", row_id).execute()
+            except Exception as e:
+                print(f"⚠ Failed to save summary for row {row_id}: {e}")
+        # Update in-memory rows so the preview uses summaries right away.
+        for row in rows:
+            if row["id"] in summaries:
+                row["summary"] = summaries[row["id"]]
+
+    # After collecting all tweets for the day, always ask EXEMPT users to confirm
+    # before broadcasting buttons to Pro users.
+    num_emoji = ["", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    preview_lines: List[str] = []
+    for idx, row in enumerate(rows, start=1):
+        summary = (row.get("summary") or "").strip()
+        if not summary:
+            text_preview = (row.get("reply_text") or "").strip()
+            if not text_preview:
+                continue
+            words = text_preview.split()
+            summary = " ".join(words[:5])
+        label = num_emoji[idx] if idx < len(num_emoji) else str(idx)
+        preview_lines.append(f'{label}: "{summary}"')
+
+    previews_block = "\n".join(preview_lines) if preview_lines else "No preview text available."
+    confirm_data = f"daily_confirm:{chat_id}:{day_est_iso}"
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ Yes, show today's tweets",
+                    "callback_data": confirm_data,
                 }
-                async with httpx.AsyncClient(timeout=20) as http:
-                    try:
-                        r = await http.post(url, json=payload)
-                        r.raise_for_status()
-                        data = r.json()
-                        if data.get("ok") and data.get("result"):
-                            daily_approval_messages[approval_key].append(
-                                {
-                                    "chat_id": approver_id,
-                                    "message_id": data["result"]["message_id"],
-                                }
-                            )
-                    except Exception as e:
-                        print(f"⚠ Failed to send approval request to {approver_id}: {e}")
+            ]
+        ]
+    }
+    message_text = (
+        "Today's tweets from the channel are ready.\n\n"
+        "Preview:\n"
+        f"{previews_block}\n\n"
+        "Do you want to see them with rephrase buttons now?"
+    )
+
+    approver_ids = list(EXEMPT_USER_IDS)
+    approval_key = (chat_id, day_est_iso)
+    daily_approval_messages.setdefault(approval_key, [])
+
+    if approver_ids:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        for approver_id in approver_ids:
+            payload = {
+                "chat_id": approver_id,
+                "text": message_text,
+                "reply_markup": keyboard,
+            }
+            async with httpx.AsyncClient(timeout=20) as http:
+                try:
+                    r = await http.post(url, json=payload)
+                    r.raise_for_status()
+                    data = r.json()
+                    if data.get("ok") and data.get("result"):
+                        daily_approval_messages[approval_key].append(
+                            {
+                                "chat_id": approver_id,
+                                "message_id": data["result"]["message_id"],
+                            }
+                        )
+                except Exception as e:
+                    print(f"⚠ Failed to send approval request to {approver_id}: {e}")
 
 
 def has_forwarded_media(message: dict) -> bool:
@@ -2018,6 +2154,175 @@ def gemini_generate_candidates(prompt: str) -> List[str]:
             raise  # Re-raise if not a rate limit or final attempt
 
 
+async def send_daily_buttons_for_channel_day(chan_id: int, day_str: str) -> None:
+    """
+    Broadcast daily tweet buttons for a given channel/day.
+    - In GLOBAL mode: goes to active Pro/trial users.
+    - In TEST mode: goes to exempt users.
+    Also adds a Refresh Pro UI button that lets Pro users refresh their /start UI.
+    """
+    if not supabase_client:
+        return
+
+    try:
+        day_rows = (
+            supabase_client.table("daily_channel_posts")
+            .select("id, day_index, tweet_url, reply_text, summary, channel_message_date")
+            .eq("channel_chat_id", chan_id)
+            .eq("day_est", day_str)
+            .order("channel_message_date", desc=False)
+            .execute()
+        )
+        rows = day_rows.data or []
+    except Exception as e:
+        print(f"⚠ Failed to fetch daily_channel_posts for broadcast {chan_id} {day_str}: {e}")
+        return
+
+    if not rows:
+        return
+
+    # Build compact horizontal rows of buttons (e.g. 4 per row)
+    buttons = [
+        {
+            "text": f"{i + 1}️⃣",
+            "callback_data": f"daily_post:{row['id']}",
+        }
+        for i, row in enumerate(rows)
+        if row.get("id") is not None
+    ]
+
+    if not buttons:
+        return
+
+    row_size = 4
+    inline_keyboard = [
+        buttons[i : i + row_size] for i in range(0, len(buttons), row_size)
+    ]
+
+    # Add a dedicated row for refreshing the Pro UI (/start equivalent for Pro users).
+    inline_keyboard.append(
+        [
+            {
+                "text": "🔄 Refresh Pro UI (/start)",
+                "callback_data": "daily_refresh_pro_ui",
+            }
+        ]
+    )
+
+    keyboard = {"inline_keyboard": inline_keyboard}
+
+    # Build summary lines for the buttons message
+    # Use the same 1️⃣,2️⃣,3️⃣... emoji style as the buttons.
+    num_emoji = ["", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    summary_lines: List[str] = []
+    for idx, row in enumerate(rows, start=1):
+        summary = (row.get("summary") or "").strip()
+        if not summary:
+            text_preview = (row.get("reply_text") or "").strip()
+            words = text_preview.split()
+            summary = " ".join(words[:5]) if words else "—"
+        label = num_emoji[idx] if idx < len(num_emoji) else str(idx)
+        summary_lines.append(f"{label} {summary}")
+
+    summaries_block = "\n".join(summary_lines)
+
+    message_text = (
+        "Hi, you can now start tweeting.\n\n"
+        "These buttons represent today's posts from the channel.\n"
+        "Tap a button to get a rephrased reply for that post.\n"
+        "⏱ Please wait until all tweets are posted before using the buttons.\n"
+        "⏱ Wait 10 seconds before tapping the next button.\n\n"
+        "If you don't see your Pro options, send /start or tap the Refresh button below.\n\n"
+        f"{summaries_block}"
+    )
+
+    # Determine target users: always active Pro/trial users.
+    target_user_ids: List[int] = []
+
+    users: List[dict] = []
+    if supabase_client:
+        try:
+            result = supabase_client.table("users").select(
+                "user_id, is_pro, pro_expires_at, trial_ends_at, has_daily_message, daily_message"
+            ).execute()
+            users = result.data or []
+        except Exception as e:
+            print(f"⚠ Failed to fetch users for daily broadcast: {e}")
+            return
+
+        from datetime import datetime, timezone
+
+        for user in users:
+            uid = user.get("user_id")
+            if not uid:
+                continue
+            is_pro_flag = False
+            if user.get("is_pro"):
+                expires = user.get("pro_expires_at")
+                if not expires:
+                    is_pro_flag = True
+                else:
+                    try:
+                        if datetime.fromisoformat(expires.replace("Z", "+00:00")) > datetime.now(timezone.utc):
+                            is_pro_flag = True
+                    except Exception:
+                        is_pro_flag = False
+            if not is_pro_flag:
+                trial_ends = user.get("trial_ends_at")
+                if trial_ends:
+                    try:
+                        if datetime.fromisoformat(trial_ends.replace("Z", "+00:00")) > datetime.now(timezone.utc):
+                            is_pro_flag = True
+                    except Exception:
+                        is_pro_flag = False
+            if is_pro_flag:
+                target_user_ids.append(uid)
+
+    send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    async with httpx.AsyncClient(timeout=20) as http:
+        if users:
+            user_by_id = {u.get("user_id"): u for u in users if u.get("user_id")}
+            for uid in target_user_ids:
+                payload = {
+                    "chat_id": uid,
+                    "text": message_text,
+                    "reply_markup": keyboard,
+                    "allow_sending_without_reply": True,
+                    "disable_web_page_preview": True,
+                }
+                try:
+                    r = await http.post(send_url, json=payload)
+                    r.raise_for_status()
+                    data = r.json()
+                    if data.get("ok") and data.get("result"):
+                        daily_buttons_messages[uid] = data["result"]["message_id"]
+                except Exception as e:
+                    print(f"⚠ Failed to send daily buttons message to {uid}: {e}")
+
+                # One-time/broadcast daily message mechanism for global-mode users.
+                # If has_daily_message is true and daily_message is set, send it now.
+                user = user_by_id.get(uid) or {}
+                if user.get("has_daily_message") and (user.get("daily_message") or "").strip():
+                    try:
+                        await telegram_send_message(
+                            uid,
+                            user["daily_message"],
+                            parse_mode="HTML",
+                        )
+                    except Exception as e:
+                        print(f"⚠ Failed to send daily message to {uid}: {e}")
+
+    # After sending daily buttons, if there is an active global daily message,
+    # clear it for all users so it is only sent once.
+    if DAILY_MODE == "global" and supabase_client:
+        try:
+            supabase_client.table("users").update(
+                {"has_daily_message": False, "daily_message": None}
+            ).eq("has_daily_message", True).execute()
+        except Exception as e:
+            print(f"⚠ Failed to clear has_daily_message flags: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """Test Supabase connection on startup and start background tasks"""
@@ -2148,10 +2453,6 @@ async def webhook(req: Request):
             # Mark this day/channel as approved (first approver wins).
             daily_approval_state[approval_key] = True
 
-            # In test mode, schedule cleanup on next channel message.
-            if DAILY_MODE != "global":
-                pending_daily_cleanup[chan_id] = day_str
-
             # Clean up all outstanding approval messages for this day/channel, including this one.
             messages = daily_approval_messages.pop(approval_key, [])
             delete_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
@@ -2162,176 +2463,14 @@ async def webhook(req: Request):
                     except Exception as e:
                         print(f"⚠ Failed to delete approval message {msg['chat_id']}/{msg['message_id']}: {e}")
 
-            try:
-                day_rows = (
-                    supabase_client.table("daily_channel_posts")
-                    .select("id, day_index, tweet_url, reply_text, summary, channel_message_date")
-                    .eq("channel_chat_id", chan_id)
-                    .eq("day_est", day_str)
-                    .order("channel_message_date", desc=False)
-                    .execute()
-                )
-                rows = day_rows.data or []
-            except Exception as e:
-                print(f"⚠ Failed to fetch daily_channel_posts for confirm {chan_id} {day_str}: {e}")
-                return {"ok": True}
+            # In both GLOBAL and TEST mode, reuse the same helper to broadcast daily buttons.
+            await send_daily_buttons_for_channel_day(chan_id, day_str)
+            return {"ok": True}
 
-            if not rows:
-                return {"ok": True}
-
-            # Build compact horizontal rows of buttons (e.g. 4 per row)
-            buttons = [
-                {
-                    "text": f"{i + 1}️⃣",
-                    "callback_data": f"daily_post:{row['id']}",
-                }
-                for i, row in enumerate(rows)
-                if row.get("id") is not None
-            ]
-
-            if not buttons:
-                return {"ok": True}
-
-            row_size = 4
-            inline_keyboard = [
-                buttons[i : i + row_size] for i in range(0, len(buttons), row_size)
-            ]
-
-            keyboard = {"inline_keyboard": inline_keyboard}
-
-            # Build summary lines for the buttons message
-            # Use the same 1️⃣,2️⃣,3️⃣... emoji style as the buttons.
-            num_emoji = ["", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-            summary_lines: List[str] = []
-            for idx, row in enumerate(rows, start=1):
-                summary = (row.get("summary") or "").strip()
-                if not summary:
-                    text_preview = (row.get("reply_text") or "").strip()
-                    words = text_preview.split()
-                    summary = " ".join(words[:5]) if words else "—"
-                label = num_emoji[idx] if idx < len(num_emoji) else str(idx)
-                summary_lines.append(f"{label} {summary}")
-
-            summaries_block = "\n".join(summary_lines)
-
-            message_text = (
-                "Hi, you can now start tweeting.\n\n"
-                "These buttons represent today's posts from the channel.\n"
-                "Tap a button to get a rephrased reply for that post.\n"
-                "⏱ Wait 10 seconds before tapping the next button.\n\n"
-                f"{summaries_block}"
-            )
-
-            # Determine target users based on mode
-            target_user_ids: List[int] = []
-
-            users: List[dict] = []
-            if DAILY_MODE == "global":
-                # Send to active Pro users
-                if supabase_client:
-                    try:
-                        result = supabase_client.table("users").select(
-                            "user_id, is_pro, pro_expires_at, trial_ends_at, has_daily_message, daily_message"
-                        ).execute()
-                        users = result.data or []
-                    except Exception as e:
-                        print(f"⚠ Failed to fetch users for daily_confirm broadcast: {e}")
-                        return {"ok": True}
-
-                    from datetime import datetime, timezone
-
-                    for user in users:
-                        uid = user.get("user_id")
-                        if not uid:
-                            continue
-                        is_pro_flag = False
-                        if user.get("is_pro"):
-                            expires = user.get("pro_expires_at")
-                            if not expires:
-                                is_pro_flag = True
-                            else:
-                                try:
-                                    if datetime.fromisoformat(expires.replace("Z", "+00:00")) > datetime.now(timezone.utc):
-                                        is_pro_flag = True
-                                except Exception:
-                                    is_pro_flag = False
-                        if not is_pro_flag:
-                            trial_ends = user.get("trial_ends_at")
-                            if trial_ends:
-                                try:
-                                    if datetime.fromisoformat(trial_ends.replace("Z", "+00:00")) > datetime.now(timezone.utc):
-                                        is_pro_flag = True
-                                except Exception:
-                                    is_pro_flag = False
-                        if is_pro_flag:
-                            target_user_ids.append(uid)
-            else:
-                # Test mode: send to exempt users
-                target_user_ids = list(EXEMPT_USER_IDS)
-
-            send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            async with httpx.AsyncClient(timeout=20) as http:
-                # In global mode, we have user records; in test mode, we only have IDs.
-                if DAILY_MODE == "global" and users:
-                    user_by_id = {u.get("user_id"): u for u in users if u.get("user_id")}
-                    for uid in target_user_ids:
-                        payload = {
-                            "chat_id": uid,
-                            "text": message_text,
-                            "reply_markup": keyboard,
-                            "allow_sending_without_reply": True,
-                            "disable_web_page_preview": True,
-                        }
-                        try:
-                            r = await http.post(send_url, json=payload)
-                            r.raise_for_status()
-                            data = r.json()
-                            if data.get("ok") and data.get("result"):
-                                daily_buttons_messages[uid] = data["result"]["message_id"]
-                        except Exception as e:
-                            print(f"⚠ Failed to send daily buttons message to {uid}: {e}")
-
-                        # One-time/broadcast daily message mechanism for global-mode users.
-                        # If has_daily_message is true and daily_message is set, send it now.
-                        user = user_by_id.get(uid) or {}
-                        if user.get("has_daily_message") and (user.get("daily_message") or "").strip():
-                            try:
-                                await telegram_send_message(
-                                    uid,
-                                    user["daily_message"],
-                                    parse_mode="HTML",
-                                )
-                            except Exception as e:
-                                print(f"⚠ Failed to send daily message to {uid}: {e}")
-                else:
-                    # Test mode: we only have IDs (exempt users)
-                    for uid in target_user_ids:
-                        payload = {
-                            "chat_id": uid,
-                            "text": message_text,
-                            "reply_markup": keyboard,
-                            "allow_sending_without_reply": True,
-                            "disable_web_page_preview": True,
-                        }
-                        try:
-                            r = await http.post(send_url, json=payload)
-                            r.raise_for_status()
-                            data = r.json()
-                            if data.get("ok") and data.get("result"):
-                                daily_buttons_messages[uid] = data["result"]["message_id"]
-                        except Exception as e:
-                            print(f"⚠ Failed to send daily buttons message to {uid}: {e}")
-
-            # After sending daily buttons, if there is an active global daily message,
-            # clear it for all users so it is only sent once.
-            if DAILY_MODE == "global" and supabase_client:
-                try:
-                    supabase_client.table("users").update(
-                        {"has_daily_message": False, "daily_message": None}
-                    ).eq("has_daily_message", True).execute()
-                except Exception as e:
-                    print(f"⚠ Failed to clear has_daily_message flags: {e}")
-
+        if data == "daily_refresh_pro_ui":
+            chat_id = callback["message"]["chat"]["id"]
+            # Treat this as an explicit request to refresh the Pro UI (equivalent to /start for Pro users).
+            await send_start_message(chat_id, user_id, is_exempt_user=False)
             return {"ok": True}
 
         if data.startswith("daily_post:"):
