@@ -105,7 +105,7 @@ RephraseBot/
 | `ALLOWED_FORWARD_CHANNEL` | None | Channel username or ID to restrict forwarding from |
 | `RATE_LIMIT_SECONDS` | `0` | Cooldown time between user requests (0 = disabled) |
 | `SYSTEM_INSTRUCTION` | See `main.py` | Custom AI rephrasing instructions |
-| `GEMINI_MODEL` | `models/gemini-2.0-flash` | AI model to use |
+| `GEMINI_MODEL` | `models/gemini-2.5-flash-lite` | AI model to use |
 
 ---
 
