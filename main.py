@@ -970,6 +970,40 @@ def contains_all_placeholders(text: str, placeholders: List[Tuple[str, str]]) ->
     return all(ph in text for ph, _ in placeholders)
 
 
+def enforce_max_chars(text: str, max_chars: int) -> str:
+    """
+    Deterministically ensure `text` is <= max_chars characters.
+    Preference: cut at a whitespace boundary when it keeps most content.
+    """
+    if max_chars <= 0:
+        return ""
+    cleaned = (text or "").strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    # Try to cut at last whitespace within the limit, but avoid extreme over-trimming.
+    cut = cleaned.rfind(" ", 0, max_chars + 1)
+    if cut >= int(max_chars * 0.7):
+        return cleaned[:cut].rstrip()
+    return cleaned[:max_chars].rstrip()
+
+
+def _target_chars_for_budget(input_len: int, max_chars: int) -> int:
+    """
+    When the original is close to the limit, instruct the model to aim well under
+    the hard max so we don't rely on retries.
+    """
+    if max_chars <= 0:
+        return 0
+    if input_len >= (max_chars - 20):
+        return max(40, min(200, max_chars - 20))
+    if input_len >= (max_chars - 40):
+        return max(60, min(220, max_chars - 15))
+    if input_len >= (max_chars - 60):
+        return max(80, min(240, max_chars - 10))
+    return max_chars
+
+
 def is_forwarded(message: dict) -> bool:
     # Telegram has multiple forward-related fields depending on API version.
     return any(
@@ -2194,6 +2228,8 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
             "Write natural text only.\n\n"
         )
     
+    target_chars = _target_chars_for_budget(len(masked_text), max_chars)
+    
     return (
         f"{SYSTEM_INSTRUCTION}\n\n"
         f"{placeholder_instruction}"
@@ -2204,8 +2240,10 @@ def build_prompt(masked_text: str, style: str, force_short: bool = False, max_ch
         f"- Sentence style: {sentence_style}\n"
         f"- Word choice: {word_strategy}\n"
         f"- Additional style: {style}\n"
-        f"- MAX LENGTH: {max_chars} characters (strict)\n\n"
-        "Output ONLY the rewritten text, nothing else. Do NOT truncate or cut off mid-sentence.\n\n"
+        f"- HARD MAX LENGTH: {max_chars} characters (strict)\n"
+        f"- TARGET LENGTH: <= {target_chars} characters (aim for this)\n\n"
+        "Output ONLY the rewritten text, nothing else.\n"
+        "If you are near the limit, self-edit to be shorter while keeping meaning.\n\n"
         "Text:\n"
         f"{masked_text}\n\n"
         f"REMINDER: OUTPUT MUST BE UNDER {max_chars} CHARACTERS."
@@ -2241,7 +2279,8 @@ def gemini_generate_candidates(prompt: str, user_id: Optional[int] = None) -> Li
             kwargs["config"] = types.GenerateContentConfig(
                 temperature=temperature,
                 top_p=top_p,
-                max_output_tokens=2048,  # Increased to allow longer responses
+                # Keep output tight; we have a strict 280-char (or less) budget.
+                max_output_tokens=256,
             )
         except Exception:
             # Fall back if signature differs in this installed version.
@@ -3013,7 +3052,7 @@ async def webhook(req: Request):
         # Reassemble final message with guaranteed spacing
         start_tags_clean = start_tags.rstrip()
         end_tags_clean = end_tags.lstrip()
-        rewritten_body_clean = rewritten_body.strip()
+        rewritten_body_clean = enforce_max_chars(rewritten_body, available_chars)
         
         final_message = start_tags_clean
         if start_tags_clean and rewritten_body_clean:
@@ -3026,6 +3065,9 @@ async def webhook(req: Request):
                 # Ensure space/newline before end tags
                 final_message += " "
             final_message += end_tags_clean
+
+        # Absolute hard stop: must never exceed 280 chars.
+        final_message = enforce_max_chars(final_message, 280)
         
         # If still over 280 after candidate selection, log warning
         if len(final_message) > 280:
