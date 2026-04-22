@@ -240,6 +240,129 @@ SYSTEM_INSTRUCTION = os.environ.get(
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "models/gemini-2.5-flash-lite")
 
+# Prefer Lite by default, with an automatic Flash fallback for 503/UNAVAILABLE.
+# `GEMINI_MODEL` is kept for backward compatibility; new deployments should prefer:
+# - GEMINI_MODEL_LITE
+# - GEMINI_MODEL_FALLBACK
+GEMINI_MODEL_LITE = os.environ.get("GEMINI_MODEL_LITE") or GEMINI_MODEL
+GEMINI_MODEL_FALLBACK = os.environ.get("GEMINI_MODEL_FALLBACK", "models/gemini-2.5-flash")
+GEMINI_FALLBACK_COOLDOWN_SECONDS = int(os.environ.get("GEMINI_FALLBACK_COOLDOWN_SECONDS", "60"))
+
+# Per-user cooldown after a 503 from Lite: user_id -> unix_ts until we route to fallback.
+gemini_fallback_until_by_user: Dict[int, float] = {}
+
+
+def _is_gemini_503(exc: Exception) -> bool:
+    """
+    Best-effort detection of Gemini 503 / UNAVAILABLE / high-demand failures across
+    varying client library exception shapes.
+    """
+    try:
+        status = getattr(exc, "status_code", None)
+        if status == 503:
+            return True
+        # Some clients nest response objects
+        resp = getattr(exc, "response", None)
+        if resp is not None and getattr(resp, "status_code", None) == 503:
+            return True
+    except Exception:
+        pass
+
+    msg = str(exc or "")
+    msg_upper = msg.upper()
+    return (
+        "503" in msg_upper
+        or "UNAVAILABLE" in msg_upper
+        or "SERVERERROR" in msg_upper
+        or "HIGH DEMAND" in msg_upper
+    )
+
+
+def _is_gemini_429(exc: Exception) -> bool:
+    try:
+        status = getattr(exc, "status_code", None)
+        if status == 429:
+            return True
+        resp = getattr(exc, "response", None)
+        if resp is not None and getattr(resp, "status_code", None) == 429:
+            return True
+    except Exception:
+        pass
+    msg = str(exc or "")
+    msg_upper = msg.upper()
+    return ("429" in msg_upper) or ("RESOURCE_EXHAUSTED" in msg_upper)
+
+
+def generate_content_with_fallback(
+    *,
+    contents: str,
+    user_id: Optional[int] = None,
+    **kwargs,
+):
+    """
+    Generate Gemini content with smart model routing:
+    - Default: Lite
+    - On Lite 503: immediate fallback to Flash and start per-user cooldown
+    - During cooldown: go straight to Flash for that user
+    - After cooldown: probe Lite again automatically (Lite-first behavior resumes)
+    """
+    import time as _time
+
+    now = _time.time()
+    use_fallback_first = False
+    had_expired_cooldown = False
+    if user_id is not None:
+        uid = int(user_id)
+        until = gemini_fallback_until_by_user.get(uid)
+        if until is not None:
+            if until > now:
+                use_fallback_first = True
+            else:
+                # Cooldown expired: remove entry so we probe Lite again.
+                had_expired_cooldown = True
+                gemini_fallback_until_by_user.pop(uid, None)
+                print(f"ℹ️ Gemini fallback cooldown expired; probing Lite for user {user_id}")
+
+    primary_model = GEMINI_MODEL_FALLBACK if use_fallback_first else GEMINI_MODEL_LITE
+    secondary_model = GEMINI_MODEL_LITE if primary_model == GEMINI_MODEL_FALLBACK else GEMINI_MODEL_FALLBACK
+
+    # If the user is in cooldown, don't waste time probing Lite first; just use fallback.
+    models_to_try = [primary_model] if use_fallback_first else [primary_model, secondary_model]
+
+    last_exc: Optional[Exception] = None
+
+    for model_name in models_to_try:
+        for attempt in range(3):
+            try:
+                resp = client.models.generate_content(model=model_name, contents=contents, **kwargs)
+                if had_expired_cooldown and model_name == GEMINI_MODEL_LITE and user_id is not None:
+                    print(f"✓ Gemini Lite healthy again; returning to Lite for user {user_id}")
+                return resp
+            except Exception as e:
+                last_exc = e
+
+                # Rate limits: brief exponential backoff.
+                if _is_gemini_429(e) and attempt < 2:
+                    _time.sleep((2 ** attempt) * 2)  # 2s, 4s
+                    continue
+
+                # If Lite is unhealthy (503), immediately fall back and set per-user cooldown.
+                if model_name == GEMINI_MODEL_LITE and _is_gemini_503(e) and user_id is not None:
+                    gemini_fallback_until_by_user[int(user_id)] = now + float(GEMINI_FALLBACK_COOLDOWN_SECONDS)
+                    print(
+                        f"⚠ Gemini Lite 503; falling back to Flash for user {user_id} "
+                        f"({GEMINI_FALLBACK_COOLDOWN_SECONDS}s cooldown)"
+                    )
+                    break  # break retry loop; move to next model (fallback)
+
+                # Otherwise: no more retries for this model.
+                break
+
+    # If we got here, both models (or only fallback during cooldown) failed.
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("gemini_unavailable")
+
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -1207,22 +1330,12 @@ def generate_tweet_summaries(rows: List[dict]) -> Dict[int, str]:
         + "\n".join(numbered_tweets)
     )
 
-    import time as _time
-    for attempt in range(3):
-        try:
-            resp = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-            )
-            text_resp = (getattr(resp, "text", None) or "").strip()
-            break
-        except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                if attempt < 2:
-                    _time.sleep((2 ** attempt) * 2)
-                    continue
-            print(f"⚠ Failed to generate tweet summaries: {e}")
-            return {}
+    try:
+        resp = generate_content_with_fallback(contents=prompt)
+        text_resp = (getattr(resp, "text", None) or "").strip()
+    except Exception as e:
+        print(f"⚠ Failed to generate tweet summaries: {e}")
+        return {}
 
     summaries: Dict[int, str] = {}
     for line in text_resp.splitlines():
@@ -2107,7 +2220,7 @@ def _parse_response(text: str) -> List[str]:
     return [cleaned]
 
 
-def gemini_generate_candidates(prompt: str) -> List[str]:
+def gemini_generate_candidates(prompt: str, user_id: Optional[int] = None) -> List[str]:
     # Multi-level randomness strategy for better variation
     randomness_level = random.choice(['conservative', 'moderate', 'aggressive'])
     
@@ -2134,24 +2247,9 @@ def gemini_generate_candidates(prompt: str) -> List[str]:
             # Fall back if signature differs in this installed version.
             kwargs = {}
 
-    # Retry logic for rate limits (429)
-    import time
-    for attempt in range(3):
-        try:
-            resp = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                **kwargs,
-            )
-            text = (getattr(resp, "text", None) or "").strip()
-            return _parse_response(text)
-        except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                if attempt < 2:
-                    wait_time = (2 ** attempt) * 2  # 2s, 4s
-                    time.sleep(wait_time)
-                    continue
-            raise  # Re-raise if not a rate limit or final attempt
+    resp = generate_content_with_fallback(contents=prompt, user_id=user_id, **kwargs)
+    text = (getattr(resp, "text", None) or "").strip()
+    return _parse_response(text)
 
 
 async def send_daily_buttons_for_channel_day(chan_id: int, day_str: str) -> None:
@@ -2869,26 +2967,23 @@ async def webhook(req: Request):
     try:
         rewritten_body = ""
         
-        # Generate 2 candidates and select the one with lowest similarity score
-        all_candidates = []
-        
-        # Generate 2 candidates with varying styles for maximum diversity
-        for candidate_num in range(2):
-            # Use different style for each candidate to increase diversity
-            style = random.choice(STYLES)
-            current_prompt = build_prompt(masked.masked, style=style, force_short=False, max_chars=available_chars,
-                                        user_tone=user_tone, user_length=user_length, user_variation=user_variation)
-            
-            candidates = gemini_generate_candidates(current_prompt)
-            print(f"DEBUG: Candidate {candidate_num + 1}: Got {len(candidates)} outputs from Gemini")
-            
-            if candidates:
-                all_candidates.extend(candidates)
-            
+        # Generate a single candidate (1 Gemini call per user request).
+        style = random.choice(STYLES)
+        current_prompt = build_prompt(
+            masked.masked,
+            style=style,
+            force_short=False,
+            max_chars=available_chars,
+            user_tone=user_tone,
+            user_length=user_length,
+            user_variation=user_variation,
+        )
+
+        all_candidates = gemini_generate_candidates(current_prompt, user_id=user_id)
+        print(f"DEBUG: Got {len(all_candidates)} outputs from Gemini")
+
         if not all_candidates:
-                    raise RuntimeError("no_candidates")
-        
-        print(f"DEBUG: Total candidates generated: {len(all_candidates)}")
+            raise RuntimeError("no_candidates")
 
         # Filter candidates that preserved all placeholders
         good_candidates = [c for c in all_candidates if contains_all_placeholders(c, masked.placeholders)]
@@ -2907,19 +3002,13 @@ async def webhook(req: Request):
         
         print(f"DEBUG: Valid candidates (under {available_chars} chars): {len(valid_candidates)}")
         
-        # Calculate similarity scores for all valid candidates
-        candidate_scores = []
-        for unmasked, original in valid_candidates:
-            similarity = calculate_text_similarity(content_body, unmasked)
-            candidate_scores.append((unmasked, similarity))
-            print(f"DEBUG: Candidate similarity: {similarity:.3f}, length: {len(unmasked)}")
-        
-        # Select the candidate with the LOWEST similarity score (most different from original)
-        # This helps evade spam detection while maintaining intent
-        rewritten_body = min(candidate_scores, key=lambda x: x[1])[0]
-        best_similarity = min(candidate_scores, key=lambda x: x[1])[1]
-        
-        print(f"DEBUG: Selected best candidate with similarity {best_similarity:.3f} ({len(rewritten_body)} chars) - LOWEST score")
+        # Single-candidate path: take the only valid candidate.
+        rewritten_body = valid_candidates[0][0]
+        best_similarity = calculate_text_similarity(content_body, rewritten_body)
+        print(
+            f"DEBUG: Candidate similarity: {best_similarity:.3f}, length: {len(rewritten_body)} "
+            f"(single-candidate mode)"
+        )
         
         # Reassemble final message with guaranteed spacing
         start_tags_clean = start_tags.rstrip()
@@ -3133,6 +3222,10 @@ async def webhook(req: Request):
                 response_time_ms=response_time_ms
             )
         
-        await telegram_send_message(chat_id, f"Error: {type(exc).__name__} - {str(exc)[:100]}")
+        # Never surface provider/raw errors to users.
+        await telegram_send_message(
+            chat_id,
+            "AI is temporarily busy. Please try again in a few seconds."
+        )
 
     return {"ok": True}

@@ -105,7 +105,10 @@ RephraseBot/
 | `ALLOWED_FORWARD_CHANNEL` | None | Channel username or ID to restrict forwarding from |
 | `RATE_LIMIT_SECONDS` | `0` | Cooldown time between user requests (0 = disabled) |
 | `SYSTEM_INSTRUCTION` | See `main.py` | Custom AI rephrasing instructions |
-| `GEMINI_MODEL` | `models/gemini-2.5-flash-lite` | AI model to use |
+| `GEMINI_MODEL_LITE` | `models/gemini-2.5-flash-lite` | Primary (cheap) model to use |
+| `GEMINI_MODEL_FALLBACK` | `models/gemini-2.5-flash` | Fallback model used when Lite is 503/UNAVAILABLE |
+| `GEMINI_FALLBACK_COOLDOWN_SECONDS` | `60` | Per-user fallback window after a Lite 503 |
+| `GEMINI_MODEL` | `models/gemini-2.5-flash-lite` | Backward-compatible alias for `GEMINI_MODEL_LITE` |
 
 ---
 
