@@ -179,9 +179,12 @@ WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]  # random string you choose
 # Optional hardening: Telegram secret header check
 TELEGRAM_WEBHOOK_SECRET_TOKEN = os.environ.get("TELEGRAM_WEBHOOK_SECRET_TOKEN")
 
-# Optional: Only rephrase messages forwarded from a specific channel
-# Can be channel username (e.g., "mychannel") or channel ID (e.g., "-1001234567890")
+# Optional: Only rephrase messages forwarded from specific channel(s).
+# Comma-separated usernames and/or numeric IDs (e.g. "news,-1001234567890,otherfeed").
 ALLOWED_FORWARD_CHANNEL = os.environ.get("ALLOWED_FORWARD_CHANNEL")
+ALLOWED_FORWARD_CHANNELS: List[str] = [
+    part.strip() for part in (ALLOWED_FORWARD_CHANNEL or "").split(",") if part.strip()
+]
 
 # Optional: Source channel whose posts are auto-captured for daily tweeting
 # Can be channel username (e.g., "mychannel") or channel ID (e.g., "-1001234567890")
@@ -192,7 +195,7 @@ TEST_CHANNEL = os.environ.get("TEST_CHANNEL")
 MODE = (os.environ.get("MODE", "GLOBAL") or "GLOBAL").strip().upper()
 
 # Daily flow mode: "global" or "test"
-# global: listens to ALLOWED_FORWARD_CHANNEL, sends buttons to Pro users, cleanup on next EST day
+# global: listens to ALLOWED_FORWARD_CHANNELS, sends buttons to Pro users, cleanup on next EST day
 # test:   listens to TEST_CHANNEL, sends buttons to exempt users, cleanup on next channel post after buttons sent
 DAILY_MODE = "global" if MODE == "GLOBAL" else "test"
 
@@ -1020,12 +1023,22 @@ def is_forwarded(message: dict) -> bool:
     )
 
 
+def _matches_allowed_forward_token(channel_id: str, channel_username: str, token: str) -> bool:
+    """True if this forwarded channel matches one ALLOWED_FORWARD_CHANNELS entry."""
+    t = token.strip()
+    if not t:
+        return False
+    if t.startswith("-") or t.isdigit():
+        return channel_id == t
+    return channel_username == t.lower().lstrip("@")
+
+
 def is_forwarded_from_allowed_channel(message: dict) -> bool:
-    """Check if message is forwarded from the allowed channel (if configured)."""
-    if not ALLOWED_FORWARD_CHANNEL:
+    """Check if message is forwarded from an allowed channel (if configured)."""
+    if not ALLOWED_FORWARD_CHANNELS:
         # No restriction - allow all forwarded messages
         return True
-    
+
     # Check forward_origin (newer API format)
     forward_origin = message.get("forward_origin")
     if forward_origin:
@@ -1033,30 +1046,21 @@ def is_forwarded_from_allowed_channel(message: dict) -> bool:
             chat = forward_origin.get("chat", {})
             channel_id = str(chat.get("id", ""))
             channel_username = chat.get("username", "").lower()
-            
-            # Match by ID or username
-            allowed = ALLOWED_FORWARD_CHANNEL.lower()
-            if allowed.startswith("-") or allowed.isdigit():
-                # Matching by ID
-                return channel_id == ALLOWED_FORWARD_CHANNEL
-            else:
-                # Matching by username (without @ prefix)
-                allowed = allowed.lstrip("@")
-                return channel_username == allowed
-    
+            return any(
+                _matches_allowed_forward_token(channel_id, channel_username, tok)
+                for tok in ALLOWED_FORWARD_CHANNELS
+            )
+
     # Check forward_from_chat (older API format)
     forward_from_chat = message.get("forward_from_chat")
     if forward_from_chat and forward_from_chat.get("type") == "channel":
         channel_id = str(forward_from_chat.get("id", ""))
         channel_username = forward_from_chat.get("username", "").lower()
-        
-        allowed = ALLOWED_FORWARD_CHANNEL.lower()
-        if allowed.startswith("-") or allowed.isdigit():
-            return channel_id == ALLOWED_FORWARD_CHANNEL
-        else:
-            allowed = allowed.lstrip("@")
-            return channel_username == allowed
-    
+        return any(
+            _matches_allowed_forward_token(channel_id, channel_username, tok)
+            for tok in ALLOWED_FORWARD_CHANNELS
+        )
+
     return False
 
 
@@ -1393,7 +1397,7 @@ def generate_tweet_summaries(rows: List[dict]) -> Dict[int, str]:
 async def handle_channel_post(message: dict) -> None:
     """
     Handle posts coming directly from the configured source channel.
-    In global mode: listens to ALLOWED_FORWARD_CHANNEL.
+    In global mode: listens to ALLOWED_FORWARD_CHANNELS (comma-separated env).
     In test mode:   listens to TEST_CHANNEL.
     Save qualifying English-only posts (with or without X link) into daily_channel_posts
     and notify the configured user with buttons to rephrase each post.
@@ -1401,7 +1405,13 @@ async def handle_channel_post(message: dict) -> None:
     # Determine which channel to listen to based on mode
     source_channel = ALLOWED_FORWARD_CHANNEL if DAILY_MODE == "global" else TEST_CHANNEL
 
-    if not supabase_client or not source_channel:
+    targets: List[str]
+    if DAILY_MODE == "global":
+        targets = ALLOWED_FORWARD_CHANNELS
+    else:
+        targets = [source_channel.strip()] if source_channel else []
+
+    if not supabase_client or not targets:
         return
 
     chat = message.get("chat") or {}
@@ -1410,15 +1420,18 @@ async def handle_channel_post(message: dict) -> None:
     if chat_id is None:
         return
 
-    # Match source channel by ID or username
-    target = source_channel.strip()
+    # Match source channel by ID or username (global mode: comma-separated list)
     is_match = False
-    if target:
+    for target in targets:
+        if not target:
+            continue
         if target.startswith("-") or target.isdigit():
-            is_match = str(chat_id) == target
-        else:
-            target_username = target.lstrip("@").lower()
-            is_match = chat_username == target_username
+            if str(chat_id) == target:
+                is_match = True
+                break
+        elif chat_username == target.lstrip("@").lower():
+            is_match = True
+            break
 
     if not is_match:
         return
@@ -2546,9 +2559,12 @@ async def webhook(req: Request):
     update = await req.json()
 
     # Handle direct channel posts (bot is admin in the channel)
-    # In global mode: listens to ALLOWED_FORWARD_CHANNEL; in test mode: listens to TEST_CHANNEL
+    # In global mode: listens to ALLOWED_FORWARD_CHANNELS; in test mode: listens to TEST_CHANNEL
     source_channel = ALLOWED_FORWARD_CHANNEL if DAILY_MODE == "global" else TEST_CHANNEL
-    if source_channel and ("channel_post" in update or "edited_channel_post" in update):
+    listen_channel_posts = (
+        bool(ALLOWED_FORWARD_CHANNELS) if DAILY_MODE == "global" else bool(source_channel and source_channel.strip())
+    )
+    if listen_channel_posts and ("channel_post" in update or "edited_channel_post" in update):
         channel_msg = update.get("channel_post") or update.get("edited_channel_post")
         if channel_msg:
             await handle_channel_post(channel_msg)
@@ -2913,7 +2929,7 @@ async def webhook(req: Request):
             return {"ok": True}
         
         # Channel restriction: Check if message is from allowed channel (if configured)
-        if ALLOWED_FORWARD_CHANNEL:
+        if ALLOWED_FORWARD_CHANNELS:
             if not is_forwarded_from_allowed_channel(message):
                 # Log invalid channel error
                 if user_id:
@@ -2922,7 +2938,11 @@ async def webhook(req: Request):
                         action_type="invalid_channel",
                         error_type="wrong_channel"
                     )
-                channel_display = f"@{ALLOWED_FORWARD_CHANNEL}" if not ALLOWED_FORWARD_CHANNEL.startswith("-") else ALLOWED_FORWARD_CHANNEL
+                labels = [
+                    tok if tok.startswith("-") or tok.isdigit() else f"@{tok.lstrip('@')}"
+                    for tok in ALLOWED_FORWARD_CHANNELS
+                ]
+                channel_display = ", ".join(labels)
                 await telegram_send_message(
                     chat_id, 
                     f"⚠️ This bot is being used only on messages <b>forwarded</b> from <b>{channel_display}</b>.",
